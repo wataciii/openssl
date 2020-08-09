@@ -1,59 +1,10 @@
 /*
- * Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL project
- * 1999.
- */
-/* ====================================================================
- * Copyright (c) 1999-2006 The OpenSSL Project.  All rights reserved.
+ * Copyright 1999-2018 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 #include <stdio.h>
@@ -61,7 +12,8 @@
 #include <openssl/evp.h>
 #include <openssl/pkcs12.h>
 #include <openssl/x509.h>
-#include "evp_locl.h"
+#include "crypto/evp.h"
+#include "evp_local.h"
 
 /* Password based encryption (PBE) functions */
 
@@ -110,6 +62,8 @@ static const EVP_PBE_CTL builtin_pbe[] = {
      NID_des_cbc, NID_sha1, PKCS5_PBE_keyivgen},
 
     {EVP_PBE_TYPE_PRF, NID_hmacWithSHA1, -1, NID_sha1, 0},
+    {EVP_PBE_TYPE_PRF, NID_hmac_md5, -1, NID_md5, 0},
+    {EVP_PBE_TYPE_PRF, NID_hmac_sha1, -1, NID_sha1, 0},
     {EVP_PBE_TYPE_PRF, NID_hmacWithMD5, -1, NID_md5, 0},
     {EVP_PBE_TYPE_PRF, NID_hmacWithSHA224, -1, NID_sha224, 0},
     {EVP_PBE_TYPE_PRF, NID_hmacWithSHA256, -1, NID_sha256, 0},
@@ -120,6 +74,8 @@ static const EVP_PBE_CTL builtin_pbe[] = {
      NID_id_GostR3411_2012_256, 0},
     {EVP_PBE_TYPE_PRF, NID_id_tc26_hmac_gost_3411_2012_512, -1,
      NID_id_GostR3411_2012_512, 0},
+    {EVP_PBE_TYPE_PRF, NID_hmacWithSHA512_224, -1, NID_sha512_224, 0},
+    {EVP_PBE_TYPE_PRF, NID_hmacWithSHA512_256, -1, NID_sha512_256, 0},
     {EVP_PBE_TYPE_KDF, NID_id_pbkdf2, -1, -1, PKCS5_v2_PBKDF2_keyivgen},
 #ifndef OPENSSL_NO_SCRYPT
     {EVP_PBE_TYPE_KDF, NID_id_scrypt, -1, -1, PKCS5_v2_scrypt_keyivgen}
@@ -137,16 +93,17 @@ int EVP_PBE_CipherInit(ASN1_OBJECT *pbe_obj, const char *pass, int passlen,
     if (!EVP_PBE_find(EVP_PBE_TYPE_OUTER, OBJ_obj2nid(pbe_obj),
                       &cipher_nid, &md_nid, &keygen)) {
         char obj_tmp[80];
+
         EVPerr(EVP_F_EVP_PBE_CIPHERINIT, EVP_R_UNKNOWN_PBE_ALGORITHM);
-        if (!pbe_obj)
-            OPENSSL_strlcpy(obj_tmp, "NULL", sizeof obj_tmp);
+        if (pbe_obj == NULL)
+            OPENSSL_strlcpy(obj_tmp, "NULL", sizeof(obj_tmp));
         else
-            i2t_ASN1_OBJECT(obj_tmp, sizeof obj_tmp, pbe_obj);
+            i2t_ASN1_OBJECT(obj_tmp, sizeof(obj_tmp), pbe_obj);
         ERR_add_error_data(2, "TYPE=", obj_tmp);
         return 0;
     }
 
-    if (!pass)
+    if (pass == NULL)
         passlen = 0;
     else if (passlen == -1)
         passlen = strlen(pass);
@@ -222,7 +179,10 @@ int EVP_PBE_alg_add_type(int pbe_type, int pbe_nid, int cipher_nid,
     pbe_tmp->md_nid = md_nid;
     pbe_tmp->keygen = keygen;
 
-    sk_EVP_PBE_CTL_push(pbe_algs, pbe_tmp);
+    if (!sk_EVP_PBE_CTL_push(pbe_algs, pbe_tmp)) {
+        OPENSSL_free(pbe_tmp);
+        goto err;
+    }
     return 1;
 
  err:
@@ -259,10 +219,9 @@ int EVP_PBE_find(int type, int pbe_nid,
     pbelu.pbe_type = type;
     pbelu.pbe_nid = pbe_nid;
 
-    if (pbe_algs) {
+    if (pbe_algs != NULL) {
         i = sk_EVP_PBE_CTL_find(pbe_algs, &pbelu);
-        if (i != -1)
-            pbetmp = sk_EVP_PBE_CTL_value(pbe_algs, i);
+        pbetmp = sk_EVP_PBE_CTL_value(pbe_algs, i);
     }
     if (pbetmp == NULL) {
         pbetmp = OBJ_bsearch_pbe2(&pbelu, builtin_pbe, OSSL_NELEM(builtin_pbe));

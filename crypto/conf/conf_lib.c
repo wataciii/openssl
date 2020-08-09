@@ -1,64 +1,17 @@
 /*
- * Written by Richard Levitte (richard@levitte.org) for the OpenSSL project
- * 2000.
- */
-/* ====================================================================
- * Copyright (c) 2000 The OpenSSL Project.  All rights reserved.
+ * Copyright 2000-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
+#include "e_os.h"
 #include <stdio.h>
 #include <string.h>
-#include <internal/conf.h>
+#include "internal/conf.h"
+#include "crypto/ctype.h"
 #include <openssl/crypto.h>
 #include <openssl/err.h>
 #include <openssl/conf.h>
@@ -171,6 +124,7 @@ long CONF_get_number(LHASH_OF(CONF_VALUE) *conf, const char *group,
     int status;
     long result = 0;
 
+    ERR_set_mark();
     if (conf == NULL) {
         status = NCONF_get_number_e(NULL, group, name, &result);
     } else {
@@ -178,12 +132,8 @@ long CONF_get_number(LHASH_OF(CONF_VALUE) *conf, const char *group,
         CONF_set_nconf(&ctmp, conf);
         status = NCONF_get_number_e(&ctmp, group, name, &result);
     }
-
-    if (status == 0) {
-        /* This function does not believe in errors... */
-        ERR_clear_error();
-    }
-    return result;
+    ERR_pop_to_mark();
+    return status == 0 ? 0L : result;
 }
 
 void CONF_free(LHASH_OF(CONF_VALUE) *conf)
@@ -224,7 +174,7 @@ int CONF_dump_bio(LHASH_OF(CONF_VALUE) *conf, BIO *out)
  * the "CONF classic" functions, for consistency.
  */
 
-CONF *NCONF_new(CONF_METHOD *meth)
+CONF *NCONF_new_with_libctx(OPENSSL_CTX *libctx, CONF_METHOD *meth)
 {
     CONF *ret;
 
@@ -233,11 +183,17 @@ CONF *NCONF_new(CONF_METHOD *meth)
 
     ret = meth->create(meth);
     if (ret == NULL) {
-        CONFerr(CONF_F_NCONF_NEW, ERR_R_MALLOC_FAILURE);
-        return (NULL);
+        CONFerr(0, ERR_R_MALLOC_FAILURE);
+        return NULL;
     }
+    ret->libctx = libctx;
 
     return ret;
+}
+
+CONF *NCONF_new(CONF_METHOD *meth)
+{
+    return NCONF_new_with_libctx(NULL, meth);
 }
 
 void NCONF_free(CONF *conf)
@@ -325,10 +281,23 @@ char *NCONF_get_string(const CONF *conf, const char *group, const char *name)
     return NULL;
 }
 
+static int default_is_number(const CONF *conf, char c)
+{
+    return ossl_isdigit(c);
+}
+
+static int default_to_int(const CONF *conf, char c)
+{
+    return (int)(c - '0');
+}
+
 int NCONF_get_number_e(const CONF *conf, const char *group, const char *name,
                        long *result)
 {
     char *str;
+    long res;
+    int (*is_number)(const CONF *, char) = &default_is_number;
+    int (*to_int)(const CONF *, char) = &default_to_int;
 
     if (result == NULL) {
         CONFerr(CONF_F_NCONF_GET_NUMBER_E, ERR_R_PASSED_NULL_PARAMETER);
@@ -340,11 +309,23 @@ int NCONF_get_number_e(const CONF *conf, const char *group, const char *name,
     if (str == NULL)
         return 0;
 
-    for (*result = 0; conf->meth->is_number(conf, *str);) {
-        *result = (*result) * 10 + conf->meth->to_int(conf, *str);
-        str++;
+    if (conf != NULL) {
+        if (conf->meth->is_number != NULL)
+            is_number = conf->meth->is_number;
+        if (conf->meth->to_int != NULL)
+            to_int = conf->meth->to_int;
+    }
+    for (res = 0; is_number(conf, *str); str++) {
+        const int d = to_int(conf, *str);
+
+        if (res > (LONG_MAX - d) / 10L) {
+            CONFerr(CONF_F_NCONF_GET_NUMBER_E, CONF_R_NUMBER_TOO_LARGE);
+            return 0;
+        }
+        res = res * 10 + d;
     }
 
+    *result = res;
     return 1;
 }
 
@@ -381,23 +362,61 @@ OPENSSL_INIT_SETTINGS *OPENSSL_INIT_new(void)
 {
     OPENSSL_INIT_SETTINGS *ret = malloc(sizeof(*ret));
 
-    if (ret != NULL)
-        memset(ret, 0, sizeof(*ret));
+    if (ret == NULL)
+        return NULL;
+
+    memset(ret, 0, sizeof(*ret));
+    ret->flags = DEFAULT_CONF_MFLAGS;
+
     return ret;
 }
 
 
 #ifndef OPENSSL_NO_STDIO
-void OPENSSL_INIT_set_config_filename(OPENSSL_INIT_SETTINGS *settings,
-                                      const char *config_file)
+int OPENSSL_INIT_set_config_filename(OPENSSL_INIT_SETTINGS *settings,
+                                     const char *filename)
 {
-    free(settings->config_name);
-    settings->config_name = config_file == NULL ? NULL : strdup(config_file);
+    char *newfilename = NULL;
+
+    if (filename != NULL) {
+        newfilename = strdup(filename);
+        if (newfilename == NULL)
+            return 0;
+    }
+
+    free(settings->filename);
+    settings->filename = newfilename;
+
+    return 1;
+}
+
+void OPENSSL_INIT_set_config_file_flags(OPENSSL_INIT_SETTINGS *settings,
+                                        unsigned long flags)
+{
+    settings->flags = flags;
+}
+
+int OPENSSL_INIT_set_config_appname(OPENSSL_INIT_SETTINGS *settings,
+                                    const char *appname)
+{
+    char *newappname = NULL;
+
+    if (appname != NULL) {
+        newappname = strdup(appname);
+        if (newappname == NULL)
+            return 0;
+    }
+
+    free(settings->appname);
+    settings->appname = newappname;
+
+    return 1;
 }
 #endif
 
 void OPENSSL_INIT_free(OPENSSL_INIT_SETTINGS *settings)
 {
-    free(settings->config_name);
+    free(settings->filename);
+    free(settings->appname);
     free(settings);
 }

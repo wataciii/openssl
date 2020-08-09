@@ -1,5 +1,10 @@
-#!/usr/bin/env perl
+#! /usr/bin/env perl
+# Copyright 2012-2020 The OpenSSL Project Authors. All Rights Reserved.
 #
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
 
 while (($output=shift) && ($output!~/\w[\w\-]*\.\w+$/)) {}
 open STDOUT,">$output";
@@ -13,6 +18,7 @@ $code.=<<___;
 	.if	__TI_EABI__
 	.asg	OPENSSL_rdtsc,_OPENSSL_rdtsc
 	.asg	OPENSSL_cleanse,_OPENSSL_cleanse
+	.asg	CRYPTO_memcmp,_CRYPTO_memcmp
 	.asg	OPENSSL_atomic_add,_OPENSSL_atomic_add
 	.asg	OPENSSL_wipe_cpu,_OPENSSL_wipe_cpu
 	.asg	OPENSSL_instrument_bus,_OPENSSL_instrument_bus
@@ -80,6 +86,29 @@ _OPENSSL_cleanse:
 || [B1] STB	B2,*B6++[2]
 || [B0]	CMPLT	6,B0,A1
    [A1]	STB	A2,*A4++[2]
+	.endasmfunc
+
+	.global	_CRYPTO_memcmp
+_CRYPTO_memcmp:
+	.asmfunc
+	MV	A6,B0
+  [!B0]	BNOP	RA
+||[!B0]	ZERO	A4
+   [B0]	MVC	B0,ILC
+|| [B0]	ZERO	A0
+	NOP	4
+
+	SPLOOP	1
+	LDBU	*A4++,A1
+||	LDBU	*B4++,B1
+	NOP	4
+	XOR.L	B1,A1,A2
+	SPKERNEL 1,0
+||	OR.S	A2,A0,A0
+
+	BNOP	RA,3
+	ZERO.L	A4
+  [A0]	MVK	1,A4
 	.endasmfunc
 
 	.global	_OPENSSL_atomic_add
@@ -202,7 +231,7 @@ bus_loop1?:
 _OPENSSL_instrument_bus2:
 	.asmfunc
 	MV	A6,B0			; reassign max
-||	MV	B4,A6			; reassing sizeof(output)
+||	MV	B4,A6			; reassign sizeof(output)
 ||	MVK	0x00004030,A3
 	MV	A4,B4			; reassign output
 ||	MVK	0,A4			; return value
@@ -255,4 +284,4 @@ bus_loop2_done?:
 ___
 
 print $code;
-close STDOUT;
+close STDOUT or die "error closing STDOUT: $!";

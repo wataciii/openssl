@@ -1,59 +1,10 @@
 /*
- * Written by Zoltan Glozik (zglozik@stones.com) for the OpenSSL project
- * 2002.
- */
-/* ====================================================================
- * Copyright (c) 2006 The OpenSSL Project.  All rights reserved.
+ * Copyright 2006-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 #include <stdio.h>
@@ -61,25 +12,32 @@
 #include <openssl/objects.h>
 #include <openssl/ts.h>
 #include <openssl/pkcs7.h>
-#include "ts_lcl.h"
+#include "ts_local.h"
+#include "crypto/ess.h"
+
+DEFINE_STACK_OF(PKCS7_SIGNER_INFO)
+DEFINE_STACK_OF(X509)
+DEFINE_STACK_OF(ESS_CERT_ID)
+DEFINE_STACK_OF(ESS_CERT_ID_V2)
+DEFINE_STACK_OF(ASN1_UTF8STRING)
+DEFINE_STACK_OF(GENERAL_NAME)
 
 static int ts_verify_cert(X509_STORE *store, STACK_OF(X509) *untrusted,
                           X509 *signer, STACK_OF(X509) **chain);
 static int ts_check_signing_certs(PKCS7_SIGNER_INFO *si,
                                   STACK_OF(X509) *chain);
-static ESS_SIGNING_CERT *ess_get_signing_cert(PKCS7_SIGNER_INFO *si);
-static int ts_find_cert(STACK_OF(ESS_CERT_ID) *cert_ids, X509 *cert);
-static int ts_issuer_serial_cmp(ESS_ISSUER_SERIAL *is, X509 *cert);
+
 static int int_ts_RESP_verify_token(TS_VERIFY_CTX *ctx,
                                     PKCS7 *token, TS_TST_INFO *tst_info);
 static int ts_check_status_info(TS_RESP *response);
 static char *ts_get_status_text(STACK_OF(ASN1_UTF8STRING) *text);
-static int ts_check_policy(ASN1_OBJECT *req_oid, TS_TST_INFO *tst_info);
+static int ts_check_policy(const ASN1_OBJECT *req_oid,
+                           const TS_TST_INFO *tst_info);
 static int ts_compute_imprint(BIO *data, TS_TST_INFO *tst_info,
                               X509_ALGOR **md_alg,
                               unsigned char **imprint, unsigned *imprint_len);
 static int ts_check_imprints(X509_ALGOR *algor_a,
-                             unsigned char *imprint_a, unsigned len_a,
+                             const unsigned char *imprint_a, unsigned len_a,
                              TS_TST_INFO *tst_info);
 static int ts_check_nonces(const ASN1_INTEGER *a, TS_TST_INFO *tst_info);
 static int ts_check_signer_name(GENERAL_NAME *tsa_name, X509 *signer);
@@ -211,122 +169,96 @@ int TS_RESP_verify_signature(PKCS7 *token, STACK_OF(X509) *certs,
 static int ts_verify_cert(X509_STORE *store, STACK_OF(X509) *untrusted,
                           X509 *signer, STACK_OF(X509) **chain)
 {
-    X509_STORE_CTX cert_ctx;
+    X509_STORE_CTX *cert_ctx = NULL;
     int i;
-    int ret = 1;
+    int ret = 0;
 
     *chain = NULL;
-    if (!X509_STORE_CTX_init(&cert_ctx, store, signer, untrusted))
-        return 0;
-    X509_STORE_CTX_set_purpose(&cert_ctx, X509_PURPOSE_TIMESTAMP_SIGN);
-    i = X509_verify_cert(&cert_ctx);
+    cert_ctx = X509_STORE_CTX_new();
+    if (cert_ctx == NULL) {
+        TSerr(TS_F_TS_VERIFY_CERT, ERR_R_MALLOC_FAILURE);
+        goto err;
+    }
+    if (!X509_STORE_CTX_init(cert_ctx, store, signer, untrusted))
+        goto end;
+    X509_STORE_CTX_set_purpose(cert_ctx, X509_PURPOSE_TIMESTAMP_SIGN);
+    i = X509_verify_cert(cert_ctx);
     if (i <= 0) {
-        int j = X509_STORE_CTX_get_error(&cert_ctx);
+        int j = X509_STORE_CTX_get_error(cert_ctx);
         TSerr(TS_F_TS_VERIFY_CERT, TS_R_CERTIFICATE_VERIFY_ERROR);
         ERR_add_error_data(2, "Verify error:",
                            X509_verify_cert_error_string(j));
-        ret = 0;
-    } else {
-        *chain = X509_STORE_CTX_get1_chain(&cert_ctx);
+        goto err;
     }
+    *chain = X509_STORE_CTX_get1_chain(cert_ctx);
+    ret = 1;
+    goto end;
 
-    X509_STORE_CTX_cleanup(&cert_ctx);
+err:
+    ret = 0;
 
+end:
+    X509_STORE_CTX_free(cert_ctx);
     return ret;
 }
 
 static int ts_check_signing_certs(PKCS7_SIGNER_INFO *si,
                                   STACK_OF(X509) *chain)
 {
-    ESS_SIGNING_CERT *ss = ess_get_signing_cert(si);
+    ESS_SIGNING_CERT *ss = ESS_SIGNING_CERT_get(si);
     STACK_OF(ESS_CERT_ID) *cert_ids = NULL;
+    ESS_SIGNING_CERT_V2 *ssv2 = ESS_SIGNING_CERT_V2_get(si);
+    STACK_OF(ESS_CERT_ID_V2) *cert_ids_v2 = NULL;
     X509 *cert;
     int i = 0;
     int ret = 0;
 
-    if (!ss)
-        goto err;
-    cert_ids = ss->cert_ids;
-    cert = sk_X509_value(chain, 0);
-    if (ts_find_cert(cert_ids, cert) != 0)
-        goto err;
+    if (ss != NULL) {
+        cert_ids = ss->cert_ids;
+        cert = sk_X509_value(chain, 0);
+        if (ess_find_cert(cert_ids, cert) != 0)
+            goto err;
 
-    /*
-     * Check the other certificates of the chain if there are more than one
-     * certificate ids in cert_ids.
-     */
-    if (sk_ESS_CERT_ID_num(cert_ids) > 1) {
-        for (i = 1; i < sk_X509_num(chain); ++i) {
-            cert = sk_X509_value(chain, i);
-            if (ts_find_cert(cert_ids, cert) < 0)
-                goto err;
+        /*
+         * Check the other certificates of the chain if there are more than one
+         * certificate ids in cert_ids.
+         */
+        if (sk_ESS_CERT_ID_num(cert_ids) > 1) {
+            for (i = 1; i < sk_X509_num(chain); ++i) {
+                cert = sk_X509_value(chain, i);
+                if (ess_find_cert(cert_ids, cert) < 0)
+                    goto err;
+            }
         }
+    } else if (ssv2 != NULL) {
+        cert_ids_v2 = ssv2->cert_ids;
+        cert = sk_X509_value(chain, 0);
+        if (ess_find_cert_v2(cert_ids_v2, cert) != 0)
+            goto err;
+
+        /*
+         * Check the other certificates of the chain if there are more than one
+         * certificate ids in cert_ids.
+         */
+        if (sk_ESS_CERT_ID_V2_num(cert_ids_v2) > 1) {
+            for (i = 1; i < sk_X509_num(chain); ++i) {
+                cert = sk_X509_value(chain, i);
+                if (ess_find_cert_v2(cert_ids_v2, cert) < 0)
+                    goto err;
+            }
+        }
+    } else {
+        goto err;
     }
+
     ret = 1;
  err:
     if (!ret)
         TSerr(TS_F_TS_CHECK_SIGNING_CERTS,
               TS_R_ESS_SIGNING_CERTIFICATE_ERROR);
     ESS_SIGNING_CERT_free(ss);
+    ESS_SIGNING_CERT_V2_free(ssv2);
     return ret;
-}
-
-static ESS_SIGNING_CERT *ess_get_signing_cert(PKCS7_SIGNER_INFO *si)
-{
-    ASN1_TYPE *attr;
-    const unsigned char *p;
-    attr = PKCS7_get_signed_attribute(si, NID_id_smime_aa_signingCertificate);
-    if (!attr)
-        return NULL;
-    p = attr->value.sequence->data;
-    return d2i_ESS_SIGNING_CERT(NULL, &p, attr->value.sequence->length);
-}
-
-/* Returns < 0 if certificate is not found, certificate index otherwise. */
-static int ts_find_cert(STACK_OF(ESS_CERT_ID) *cert_ids, X509 *cert)
-{
-    int i;
-    unsigned char cert_sha1[SHA_DIGEST_LENGTH];
-
-    if (!cert_ids || !cert)
-        return -1;
-
-    X509_digest(cert, EVP_sha1(), cert_sha1, NULL);
-
-    /* Recompute SHA1 hash of certificate if necessary (side effect). */
-    X509_check_purpose(cert, -1, 0);
-
-    /* Look for cert in the cert_ids vector. */
-    for (i = 0; i < sk_ESS_CERT_ID_num(cert_ids); ++i) {
-        ESS_CERT_ID *cid = sk_ESS_CERT_ID_value(cert_ids, i);
-
-        if (cid->hash->length == SHA_DIGEST_LENGTH
-            && memcmp(cid->hash->data, cert_sha1, SHA_DIGEST_LENGTH) == 0) {
-            ESS_ISSUER_SERIAL *is = cid->issuer_serial;
-            if (!is || !ts_issuer_serial_cmp(is, cert))
-                return i;
-        }
-    }
-
-    return -1;
-}
-
-static int ts_issuer_serial_cmp(ESS_ISSUER_SERIAL *is, X509 *cert)
-{
-    GENERAL_NAME *issuer;
-
-    if (!is || !cert || sk_GENERAL_NAME_num(is->issuer) != 1)
-        return -1;
-
-    issuer = sk_GENERAL_NAME_value(is->issuer, 0);
-    if (issuer->type != GEN_DIRNAME
-        || X509_NAME_cmp(issuer->d.dirn, X509_get_issuer_name(cert)))
-        return -1;
-
-    if (ASN1_INTEGER_cmp(is->serial, X509_get_serialNumber(cert)))
-        return -1;
-
-    return 0;
 }
 
 /*-
@@ -387,36 +319,43 @@ static int int_ts_RESP_verify_token(TS_VERIFY_CTX *ctx,
     unsigned char *imprint = NULL;
     unsigned imprint_len = 0;
     int ret = 0;
+    int flags = ctx->flags;
 
-    if ((ctx->flags & TS_VFY_SIGNATURE)
+    /* Some options require us to also check the signature */
+    if (((flags & TS_VFY_SIGNER) && tsa_name != NULL)
+            || (flags & TS_VFY_TSA_NAME)) {
+        flags |= TS_VFY_SIGNATURE;
+    }
+
+    if ((flags & TS_VFY_SIGNATURE)
         && !TS_RESP_verify_signature(token, ctx->certs, ctx->store, &signer))
         goto err;
-    if ((ctx->flags & TS_VFY_VERSION)
+    if ((flags & TS_VFY_VERSION)
         && TS_TST_INFO_get_version(tst_info) != 1) {
         TSerr(TS_F_INT_TS_RESP_VERIFY_TOKEN, TS_R_UNSUPPORTED_VERSION);
         goto err;
     }
-    if ((ctx->flags & TS_VFY_POLICY)
+    if ((flags & TS_VFY_POLICY)
         && !ts_check_policy(ctx->policy, tst_info))
         goto err;
-    if ((ctx->flags & TS_VFY_IMPRINT)
+    if ((flags & TS_VFY_IMPRINT)
         && !ts_check_imprints(ctx->md_alg, ctx->imprint, ctx->imprint_len,
                               tst_info))
         goto err;
-    if ((ctx->flags & TS_VFY_DATA)
+    if ((flags & TS_VFY_DATA)
         && (!ts_compute_imprint(ctx->data, tst_info,
                                 &md_alg, &imprint, &imprint_len)
             || !ts_check_imprints(md_alg, imprint, imprint_len, tst_info)))
         goto err;
-    if ((ctx->flags & TS_VFY_NONCE)
+    if ((flags & TS_VFY_NONCE)
         && !ts_check_nonces(ctx->nonce, tst_info))
         goto err;
-    if ((ctx->flags & TS_VFY_SIGNER)
+    if ((flags & TS_VFY_SIGNER)
         && tsa_name && !ts_check_signer_name(tsa_name, signer)) {
         TSerr(TS_F_INT_TS_RESP_VERIFY_TOKEN, TS_R_TSA_NAME_MISMATCH);
         goto err;
     }
-    if ((ctx->flags & TS_VFY_TSA_NAME)
+    if ((flags & TS_VFY_TSA_NAME)
         && !ts_check_signer_name(ctx->tsa_name, signer)) {
         TSerr(TS_F_INT_TS_RESP_VERIFY_TOKEN, TS_R_TSA_UNTRUSTED);
         goto err;
@@ -482,37 +421,13 @@ static int ts_check_status_info(TS_RESP *response)
 
 static char *ts_get_status_text(STACK_OF(ASN1_UTF8STRING) *text)
 {
-    int i;
-    unsigned int length = 0;
-    char *result = NULL;
-    char *p;
-
-    for (i = 0; i < sk_ASN1_UTF8STRING_num(text); ++i) {
-        ASN1_UTF8STRING *current = sk_ASN1_UTF8STRING_value(text, i);
-        length += ASN1_STRING_length(current);
-        length += 1;            /* separator character */
-    }
-    if ((result = OPENSSL_malloc(length)) == NULL) {
-        TSerr(TS_F_TS_GET_STATUS_TEXT, ERR_R_MALLOC_FAILURE);
-        return NULL;
-    }
-    
-    for (i = 0, p = result; i < sk_ASN1_UTF8STRING_num(text); ++i) {
-        ASN1_UTF8STRING *current = sk_ASN1_UTF8STRING_value(text, i);
-        length = ASN1_STRING_length(current);
-        if (i > 0)
-            *p++ = '/';
-        strncpy(p, (const char *)ASN1_STRING_data(current), length);
-        p += length;
-    }
-    *p = '\0';
-
-    return result;
+    return sk_ASN1_UTF8STRING2text(text, "/", TS_MAX_STATUS_LENGTH);
 }
 
-static int ts_check_policy(ASN1_OBJECT *req_oid, TS_TST_INFO *tst_info)
+static int ts_check_policy(const ASN1_OBJECT *req_oid,
+                           const TS_TST_INFO *tst_info)
 {
-    ASN1_OBJECT *resp_oid = tst_info->policy_id;
+    const ASN1_OBJECT *resp_oid = tst_info->policy_id;
 
     if (OBJ_cmp(req_oid, resp_oid) != 0) {
         TSerr(TS_F_TS_CHECK_POLICY, TS_R_POLICY_MISMATCH);
@@ -577,7 +492,7 @@ static int ts_compute_imprint(BIO *data, TS_TST_INFO *tst_info,
 }
 
 static int ts_check_imprints(X509_ALGOR *algor_a,
-                             unsigned char *imprint_a, unsigned len_a,
+                             const unsigned char *imprint_a, unsigned len_a,
                              TS_TST_INFO *tst_info)
 {
     TS_MSG_IMPRINT *b = tst_info->msg_imprint;
@@ -597,7 +512,7 @@ static int ts_check_imprints(X509_ALGOR *algor_a,
     }
 
     ret = len_a == (unsigned)ASN1_STRING_length(b->hashed_msg) &&
-        memcmp(imprint_a, ASN1_STRING_data(b->hashed_msg), len_a) == 0;
+        memcmp(imprint_a, ASN1_STRING_get0_data(b->hashed_msg), len_a) == 0;
  err:
     if (!ret)
         TSerr(TS_F_TS_CHECK_IMPRINTS, TS_R_MESSAGE_IMPRINT_MISMATCH);

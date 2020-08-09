@@ -1,65 +1,19 @@
 /*
- * Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL project
- * 1999.
- */
-/* ====================================================================
- * Copyright (c) 1999 The OpenSSL Project.  All rights reserved.
+ * Copyright 1999-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 #include <stdio.h>
 #include "internal/cryptlib.h"
 #include <openssl/x509v3.h>
-#include "internal/x509_int.h"
+#include "crypto/x509.h"
+
+DEFINE_STACK_OF(X509_TRUST)
+DEFINE_STACK_OF(ASN1_OBJECT)
 
 static int tr_cmp(const X509_TRUST *const *a, const X509_TRUST *const *b);
 static void trtable_free(X509_TRUST *p);
@@ -147,13 +101,14 @@ int X509_TRUST_get_by_id(int id)
 {
     X509_TRUST tmp;
     int idx;
+
     if ((id >= X509_TRUST_MIN) && (id <= X509_TRUST_MAX))
         return id - X509_TRUST_MIN;
-    tmp.trust = id;
-    if (!trtable)
+    if (trtable == NULL)
         return -1;
+    tmp.trust = id;
     idx = sk_X509_TRUST_find(trtable, &tmp);
-    if (idx == -1)
+    if (idx < 0)
         return -1;
     return idx + X509_TRUST_COUNT;
 }
@@ -169,7 +124,7 @@ int X509_TRUST_set(int *t, int trust)
 }
 
 int X509_TRUST_add(int id, int flags, int (*ck) (X509_TRUST *, X509 *, int),
-                   char *name, int arg1, void *arg2)
+                   const char *name, int arg1, void *arg2)
 {
     int idx;
     X509_TRUST *trtmp;
@@ -197,7 +152,7 @@ int X509_TRUST_add(int id, int flags, int (*ck) (X509_TRUST *, X509 *, int),
     /* dup supplied name */
     if ((trtmp->name = OPENSSL_strdup(name)) == NULL) {
         X509err(X509_F_X509_TRUST_ADD, ERR_R_MALLOC_FAILURE);
-        return 0;
+        goto err;
     }
     /* Keep the dynamic flag of existing entry */
     trtmp->flags &= X509_TRUST_DYNAMIC;
@@ -214,19 +169,25 @@ int X509_TRUST_add(int id, int flags, int (*ck) (X509_TRUST *, X509 *, int),
         if (trtable == NULL
             && (trtable = sk_X509_TRUST_new(tr_cmp)) == NULL) {
             X509err(X509_F_X509_TRUST_ADD, ERR_R_MALLOC_FAILURE);
-            return 0;
+            goto err;;
         }
         if (!sk_X509_TRUST_push(trtable, trtmp)) {
             X509err(X509_F_X509_TRUST_ADD, ERR_R_MALLOC_FAILURE);
-            return 0;
+            goto err;
         }
     }
     return 1;
+ err:
+    if (idx == -1) {
+        OPENSSL_free(trtmp->name);
+        OPENSSL_free(trtmp);
+    }
+    return 0;
 }
 
 static void trtable_free(X509_TRUST *p)
 {
-    if (!p)
+    if (p == NULL)
         return;
     if (p->flags & X509_TRUST_DYNAMIC) {
         if (p->flags & X509_TRUST_DYNAMIC_NAME)
@@ -237,24 +198,21 @@ static void trtable_free(X509_TRUST *p)
 
 void X509_TRUST_cleanup(void)
 {
-    unsigned int i;
-    for (i = 0; i < X509_TRUST_COUNT; i++)
-        trtable_free(trstandard + i);
     sk_X509_TRUST_pop_free(trtable, trtable_free);
     trtable = NULL;
 }
 
-int X509_TRUST_get_flags(X509_TRUST *xp)
+int X509_TRUST_get_flags(const X509_TRUST *xp)
 {
     return xp->flags;
 }
 
-char *X509_TRUST_get0_name(X509_TRUST *xp)
+char *X509_TRUST_get0_name(const X509_TRUST *xp)
 {
     return xp->name;
 }
 
-int X509_TRUST_get_trust(X509_TRUST *xp)
+int X509_TRUST_get_trust(const X509_TRUST *xp)
 {
     return xp->trust;
 }
@@ -285,8 +243,9 @@ static int trust_1oid(X509_TRUST *trust, X509 *x, int flags)
 static int trust_compat(X509_TRUST *trust, X509 *x, int flags)
 {
     /* Call for side-effect of computing hash and caching extensions */
-    X509_check_purpose(x, -1, 0);
-    if ((flags & X509_TRUST_NO_SS_COMPAT) == 0 && x->ex_flags & EXFLAG_SS)
+    if (X509_check_purpose(x, -1, 0) != 1)
+        return X509_TRUST_UNTRUSTED;
+    if ((flags & X509_TRUST_NO_SS_COMPAT) == 0 && (x->ex_flags & EXFLAG_SS))
         return X509_TRUST_TRUSTED;
     else
         return X509_TRUST_UNTRUSTED;

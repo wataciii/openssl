@@ -1,22 +1,29 @@
-#! /usr/bin/perl
+#! /usr/bin/env perl
+# Copyright 2015-2020 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+
 
 use strict;
 use warnings;
 
 use File::Compare qw/compare_text/;
 use File::Copy;
-use lib 'testlib';
 use OpenSSL::Test qw/:DEFAULT/;
 
 my %conversionforms = (
     # Default conversion forms.  Other series may be added with
     # specific test types as key.
     "*"		=> [ "d", "p" ],
+    "msb"	=> [ "d", "p", "msblob" ],
     );
 sub tconversion {
     my $testtype = shift;
     my $t = shift;
-    my @conversionforms = 
+    my @conversionforms =
 	defined($conversionforms{$testtype}) ?
 	@{$conversionforms{$testtype}} :
 	@{$conversionforms{"*"}};
@@ -82,9 +89,6 @@ sub tconversion {
 	  }
       }
     }
-    unlink glob "$testtype-f.*";
-    unlink glob "$testtype-ff.*";
-    unlink glob "$testtype-fff.*";
 }
 
 sub cmp_text {

@@ -1,70 +1,24 @@
 /*
- * Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL project
- * 2001.
- */
-/* ====================================================================
- * Copyright (c) 1998-2001 The OpenSSL Project.  All rights reserved.
+ * Copyright 2001-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.openssl.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    openssl-core@openssl.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.openssl.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 #include <stdio.h>
 #include "internal/cryptlib.h"
 #include <openssl/objects.h>
-#include <openssl/rand.h>
 #include <openssl/x509.h>
 #include <openssl/pem.h>
 #include <openssl/x509v3.h>
 #include <openssl/ocsp.h>
-#include "ocsp_lcl.h"
+#include "ocsp_local.h"
+
+DEFINE_STACK_OF(OCSP_ONEREQ)
+DEFINE_STACK_OF(X509)
+DEFINE_STACK_OF(OCSP_SINGLERESP)
 
 /*
  * Utility functions related to sending OCSP responses and extracting
@@ -218,15 +172,28 @@ int OCSP_basic_add1_cert(OCSP_BASICRESP *resp, X509 *cert)
     return 1;
 }
 
-int OCSP_basic_sign(OCSP_BASICRESP *brsp,
-                    X509 *signer, EVP_PKEY *key, const EVP_MD *dgst,
+/*
+ * Sign an OCSP response using the parameters contained in the digest context,
+ * set the responderID to the subject name in the signer's certificate, and
+ * include one or more optional certificates in the response.
+ */
+
+int OCSP_basic_sign_ctx(OCSP_BASICRESP *brsp,
+                    X509 *signer, EVP_MD_CTX *ctx,
                     STACK_OF(X509) *certs, unsigned long flags)
 {
     int i;
     OCSP_RESPID *rid;
+    EVP_PKEY *pkey;
 
-    if (!X509_check_private_key(signer, key)) {
-        OCSPerr(OCSP_F_OCSP_BASIC_SIGN,
+    if (ctx == NULL || EVP_MD_CTX_pkey_ctx(ctx) == NULL) {
+        OCSPerr(OCSP_F_OCSP_BASIC_SIGN_CTX, OCSP_R_NO_SIGNER_KEY);
+        goto err;
+    }
+
+    pkey = EVP_PKEY_CTX_get0_pkey(EVP_MD_CTX_pkey_ctx(ctx));
+    if (pkey == NULL || !X509_check_private_key(signer, pkey)) {
+        OCSPerr(OCSP_F_OCSP_BASIC_SIGN_CTX,
                 OCSP_R_PRIVATE_KEY_DOES_NOT_MATCH_CERTIFICATE);
         goto err;
     }
@@ -243,17 +210,10 @@ int OCSP_basic_sign(OCSP_BASICRESP *brsp,
 
     rid = &brsp->tbsResponseData.responderId;
     if (flags & OCSP_RESPID_KEY) {
-        unsigned char md[SHA_DIGEST_LENGTH];
-        X509_pubkey_digest(signer, EVP_sha1(), md, NULL);
-        if ((rid->value.byKey = ASN1_OCTET_STRING_new()) == NULL)
+        if (!OCSP_RESPID_set_by_key(rid, signer))
             goto err;
-        if (!(ASN1_OCTET_STRING_set(rid->value.byKey, md, SHA_DIGEST_LENGTH)))
-            goto err;
-        rid->type = V_OCSP_RESPID_KEY;
-    } else {
-        if (!X509_NAME_set(&rid->value.byName, X509_get_subject_name(signer)))
-            goto err;
-        rid->type = V_OCSP_RESPID_NAME;
+    } else if (!OCSP_RESPID_set_by_name(rid, signer)) {
+        goto err;
     }
 
     if (!(flags & OCSP_NOTIME) &&
@@ -265,10 +225,119 @@ int OCSP_basic_sign(OCSP_BASICRESP *brsp,
      * -- Richard Levitte
      */
 
-    if (!OCSP_BASICRESP_sign(brsp, key, dgst, 0))
+    if (!OCSP_BASICRESP_sign_ctx(brsp, ctx, 0))
         goto err;
 
     return 1;
  err:
     return 0;
+}
+
+int OCSP_basic_sign(OCSP_BASICRESP *brsp,
+                    X509 *signer, EVP_PKEY *key, const EVP_MD *dgst,
+                    STACK_OF(X509) *certs, unsigned long flags)
+{
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    EVP_PKEY_CTX *pkctx = NULL;
+    int i;
+
+    if (ctx == NULL)
+        return 0;
+
+    if (!EVP_DigestSignInit(ctx, &pkctx, dgst, NULL, key)) {
+        EVP_MD_CTX_free(ctx);
+        return 0;
+    }
+    i = OCSP_basic_sign_ctx(brsp, signer, ctx, certs, flags);
+    EVP_MD_CTX_free(ctx);
+    return i;
+}
+
+int OCSP_RESPID_set_by_name(OCSP_RESPID *respid, X509 *cert)
+{
+    if (!X509_NAME_set(&respid->value.byName, X509_get_subject_name(cert)))
+        return 0;
+
+    respid->type = V_OCSP_RESPID_NAME;
+
+    return 1;
+}
+
+int OCSP_RESPID_set_by_key_ex(OCSP_RESPID *respid, X509 *cert,
+                              OPENSSL_CTX *libctx, const char *propq)
+{
+    ASN1_OCTET_STRING *byKey = NULL;
+    unsigned char md[SHA_DIGEST_LENGTH];
+    EVP_MD *sha1 = EVP_MD_fetch(libctx, "SHA1", propq);
+    int ret = 0;
+
+    if (sha1 == NULL)
+        return 0;
+
+    /* RFC2560 requires SHA1 */
+    if (!X509_pubkey_digest(cert, sha1, md, NULL))
+        goto err;
+
+    byKey = ASN1_OCTET_STRING_new();
+    if (byKey == NULL)
+        goto err;
+
+    if (!(ASN1_OCTET_STRING_set(byKey, md, SHA_DIGEST_LENGTH))) {
+        ASN1_OCTET_STRING_free(byKey);
+        goto err;
+    }
+
+    respid->type = V_OCSP_RESPID_KEY;
+    respid->value.byKey = byKey;
+
+    ret = 1;
+ err:
+    EVP_MD_free(sha1);
+    return ret;
+}
+
+int OCSP_RESPID_set_by_key(OCSP_RESPID *respid, X509 *cert)
+{
+    return OCSP_RESPID_set_by_key_ex(respid, cert, NULL, NULL);
+}
+
+int OCSP_RESPID_match_ex(OCSP_RESPID *respid, X509 *cert, OPENSSL_CTX *libctx,
+                         const char *propq)
+{
+    EVP_MD *sha1 = NULL;
+    int ret = 0;
+
+    if (respid->type == V_OCSP_RESPID_KEY) {
+        unsigned char md[SHA_DIGEST_LENGTH];
+
+        sha1 = EVP_MD_fetch(libctx, "SHA1", propq);
+        if (sha1 == NULL)
+            goto err;
+
+        if (respid->value.byKey == NULL)
+            goto err;
+
+        /* RFC2560 requires SHA1 */
+        if (!X509_pubkey_digest(cert, sha1, md, NULL))
+            goto err;
+
+        ret = (ASN1_STRING_length(respid->value.byKey) == SHA_DIGEST_LENGTH)
+              && (memcmp(ASN1_STRING_get0_data(respid->value.byKey), md,
+                         SHA_DIGEST_LENGTH) == 0);
+    } else if (respid->type == V_OCSP_RESPID_NAME) {
+        if (respid->value.byName == NULL)
+            return 0;
+
+        return X509_NAME_cmp(respid->value.byName,
+                             X509_get_subject_name(cert)) == 0;
+    }
+
+ err:
+    EVP_MD_free(sha1);
+    return ret;
+}
+
+int OCSP_RESPID_match(OCSP_RESPID *respid, X509 *cert)
+{
+    return OCSP_RESPID_match_ex(respid, cert, NULL, NULL);
 }

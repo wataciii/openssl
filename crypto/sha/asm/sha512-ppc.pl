@@ -1,4 +1,11 @@
-#!/usr/bin/env perl
+#! /usr/bin/env perl
+# Copyright 2006-2020 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+
 
 # ====================================================================
 # Written by Andy Polyakov <appro@openssl.org> for the OpenSSL
@@ -19,7 +26,7 @@
 #
 # (*)	64-bit code in 32-bit application context, which actually is
 #	on TODO list. It should be noted that for safe deployment in
-#	32-bit *mutli-threaded* context asyncronous signals should be
+#	32-bit *multi-threaded* context asynchronous signals should be
 #	blocked upon entry to SHA512 block routine. This is because
 #	32-bit signaling procedure invalidates upper halves of GPRs.
 #	Context switch procedure preserves them, but not signaling:-(
@@ -34,8 +41,10 @@
 # block signals prior calling this routine. For the record, in 32-bit
 # context R2 serves as TLS pointer, while in 64-bit context - R13.
 
-$flavour=shift;
-$output =shift;
+# $output is the last argument if it looks like a file (it has an extension)
+# $flavour is the first argument if it doesn't look like a file
+$output = $#ARGV >= 0 && $ARGV[$#ARGV] =~ m|\.\w+$| ? pop : undef;
+$flavour = $#ARGV >= 0 && $ARGV[0] !~ m|\.| ? shift : undef;
 
 if ($flavour =~ /64/) {
 	$SIZE_T=8;
@@ -62,7 +71,8 @@ $0 =~ m/(.*[\/\\])[^\/\\]+$/; $dir=$1;
 ( $xlate="${dir}../../perlasm/ppc-xlate.pl" and -f $xlate) or
 die "can't locate ppc-xlate.pl";
 
-open STDOUT,"| $^X $xlate $flavour $output" || die "can't call $xlate: $!";
+open STDOUT,"| $^X $xlate $flavour \"$output\""
+    or die "can't call $xlate: $!";
 
 if ($output =~ /512/) {
 	$func="sha512_block_ppc";
@@ -259,7 +269,7 @@ Lunaligned:
 	andi.	$t1,$t1,`4096-16*$SZ`	; distance to closest page boundary
 	beq	Lcross_page
 	$UCMP	$num,$t1
-	ble-	Laligned		; didn't cross the page boundary
+	ble	Laligned		; didn't cross the page boundary
 	subfc	$num,$t1,$num
 	add	$t1,$inp,$t1
 	$PUSH	$num,`$FRAME-$SIZE_T*25`($sp)	; save real remaining num
@@ -317,7 +327,7 @@ $code.=<<___;
 	$POP	$inp,`$FRAME-$SIZE_T*26`($sp)	; restore real inp
 	$POP	$num,`$FRAME-$SIZE_T*25`($sp)	; restore real num
 	addic.	$num,$num,`-16*$SZ`		; num--
-	bne-	Lunaligned
+	bne	Lunaligned
 
 Ldone:
 	$POP	r0,`$FRAME+$LRSAVE`($sp)
@@ -396,7 +406,7 @@ for(;$i<32;$i++) {
 	unshift(@V,pop(@V));
 }
 $code.=<<___;
-	bdnz-	Lrounds
+	bdnz	Lrounds
 
 	$POP	$ctx,`$FRAME-$SIZE_T*22`($sp)
 	$POP	$inp,`$FRAME-$SIZE_T*23`($sp)	; inp pointer
@@ -644,7 +654,7 @@ for(;$i<32;$i++) {
 	($a0,$a1,$a2,$a3) = ($a2,$a3,$a0,$a1);
 }
 $code.=<<___;
-	bdnz-	Lrounds
+	bdnz	Lrounds
 
 	$POP	$ctx,`$FRAME-$SIZE_T*22`($sp)
 	$POP	$inp,`$FRAME-$SIZE_T*23`($sp)	; inp pointer
@@ -789,4 +799,4 @@ ___
 
 $code =~ s/\`([^\`]*)\`/eval $1/gem;
 print $code;
-close STDOUT;
+close STDOUT or die "error closing STDOUT: $!";

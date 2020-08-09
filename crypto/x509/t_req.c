@@ -1,58 +1,10 @@
-/* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
- * All rights reserved.
+/*
+ * Copyright 1995-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * This package is an SSL implementation written
- * by Eric Young (eay@cryptsoft.com).
- * The implementation was written so as to conform with Netscapes SSL.
- *
- * This library is free for commercial and non-commercial use as long as
- * the following conditions are aheared to.  The following conditions
- * apply to all code found in this distribution, be it the RC4, RSA,
- * lhash, DES, etc., code; not just the SSL code.  The SSL documentation
- * included with this distribution is covered by the same copyright terms
- * except that the holder is Tim Hudson (tjh@cryptsoft.com).
- *
- * Copyright remains Eric Young's, and as such any Copyright notices in
- * the code are not to be removed.
- * If this package is used in a product, Eric Young should be given attribution
- * as the author of the parts of the library used.
- * This can be in the form of a textual message at program startup or
- * in documentation (online or textual) provided with the package.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. All advertising materials mentioning features or use of this software
- *    must display the following acknowledgement:
- *    "This product includes cryptographic software written by
- *     Eric Young (eay@cryptsoft.com)"
- *    The word 'cryptographic' can be left out if the rouines from the library
- *    being used are not cryptographic related :-).
- * 4. If you include any Windows specific code (or a derivative thereof) from
- *    the apps directory (application code) you must include an acknowledgement:
- *    "This product includes software written by Tim Hudson (tjh@cryptsoft.com)"
- *
- * THIS SOFTWARE IS PROVIDED BY ERIC YOUNG ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- *
- * The licence and distribution terms for any publically available version or
- * derivative of this code cannot be changed.  i.e. this code cannot simply be
- * copied and put under another distribution licence
- * [including the GNU Public Licence.]
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 #include <stdio.h>
@@ -65,6 +17,8 @@
 #include <openssl/rsa.h>
 #include <openssl/dsa.h>
 
+DEFINE_STACK_OF(X509_EXTENSION)
+
 #ifndef OPENSSL_NO_STDIO
 int X509_REQ_print_fp(FILE *fp, X509_REQ *x)
 {
@@ -73,12 +27,12 @@ int X509_REQ_print_fp(FILE *fp, X509_REQ *x)
 
     if ((b = BIO_new(BIO_s_file())) == NULL) {
         X509err(X509_F_X509_REQ_PRINT_FP, ERR_R_BUF_LIB);
-        return (0);
+        return 0;
     }
     BIO_set_fp(b, fp, BIO_NOCLOSE);
     ret = X509_REQ_print(b, x);
     BIO_free(b);
-    return (ret);
+    return ret;
 }
 #endif
 
@@ -108,8 +62,13 @@ int X509_REQ_print_ex(BIO *bp, X509_REQ *x, unsigned long nmflags,
     }
     if (!(cflag & X509_FLAG_NO_VERSION)) {
         l = X509_REQ_get_version(x);
-        if (BIO_printf(bp, "%8sVersion: %ld (0x%lx)\n", "", l + 1, l) <= 0)
-            goto err;
+        if (l >= 0 && l <= 2) {
+            if (BIO_printf(bp, "%8sVersion: %ld (0x%lx)\n", "", l + 1, (unsigned long)l) <= 0)
+                goto err;
+        } else {
+            if (BIO_printf(bp, "%8sVersion: Unknown (%ld)\n", "", l) <= 0)
+                goto err;
+        }
     }
     if (!(cflag & X509_FLAG_NO_SUBJECT)) {
         if (BIO_printf(bp, "        Subject:%c", mlch) <= 0)
@@ -134,13 +93,14 @@ int X509_REQ_print_ex(BIO *bp, X509_REQ *x, unsigned long nmflags,
         if (BIO_puts(bp, "\n") <= 0)
             goto err;
 
-        pkey = X509_REQ_get_pubkey(x);
+        pkey = X509_REQ_get0_pubkey(x);
         if (pkey == NULL) {
-            BIO_printf(bp, "%12sUnable to load Public Key\n", "");
+            if (BIO_printf(bp, "%12sUnable to load Public Key\n", "") <= 0)
+                goto err;
             ERR_print_errors(bp);
         } else {
-            EVP_PKEY_print_public(bp, pkey, 16, NULL);
-            EVP_PKEY_free(pkey);
+            if (EVP_PKEY_print_public(bp, pkey, 16, NULL) <= 0)
+                goto err;
         }
     }
 
@@ -169,6 +129,10 @@ int X509_REQ_print_ex(BIO *bp, X509_REQ *x, unsigned long nmflags,
                 if ((j = i2a_ASN1_OBJECT(bp, aobj)) > 0) {
                     ii = 0;
                     count = X509_ATTRIBUTE_count(a);
+                    if (count == 0) {
+                      X509err(X509_F_X509_REQ_PRINT_EX, X509_R_INVALID_ATTRIBUTES);
+                      return 0;
+                    }
  get_next:
                     at = X509_ATTRIBUTE_get0_type(a, ii);
                     type = at->type;
@@ -179,15 +143,22 @@ int X509_REQ_print_ex(BIO *bp, X509_REQ *x, unsigned long nmflags,
                         goto err;
                 if (BIO_puts(bp, ":") <= 0)
                     goto err;
-                if ((type == V_ASN1_PRINTABLESTRING) ||
-                    (type == V_ASN1_T61STRING) ||
-                    (type == V_ASN1_IA5STRING)) {
+                switch (type) {
+                case V_ASN1_PRINTABLESTRING:
+                case V_ASN1_T61STRING:
+                case V_ASN1_NUMERICSTRING:
+                case V_ASN1_UTF8STRING:
+                case V_ASN1_IA5STRING:
                     if (BIO_write(bp, (char *)bs->data, bs->length)
-                        != bs->length)
+                            != bs->length)
                         goto err;
-                    BIO_puts(bp, "\n");
-                } else {
-                    BIO_puts(bp, "unable to print attribute\n");
+                    if (BIO_puts(bp, "\n") <= 0)
+                        goto err;
+                    break;
+                default:
+                    if (BIO_puts(bp, "unable to print attribute\n") <= 0)
+                        goto err;
+                    break;
                 }
                 if (++ii < count)
                     goto get_next;
@@ -197,7 +168,8 @@ int X509_REQ_print_ex(BIO *bp, X509_REQ *x, unsigned long nmflags,
     if (!(cflag & X509_FLAG_NO_EXTENSIONS)) {
         exts = X509_REQ_get_extensions(x);
         if (exts) {
-            BIO_printf(bp, "%8sRequested Extensions:\n", "");
+            if (BIO_printf(bp, "%8sRequested Extensions:\n", "") <= 0)
+                goto err;
             for (i = 0; i < sk_X509_EXTENSION_num(exts); i++) {
                 ASN1_OBJECT *obj;
                 X509_EXTENSION *ex;
@@ -206,13 +178,16 @@ int X509_REQ_print_ex(BIO *bp, X509_REQ *x, unsigned long nmflags,
                 if (BIO_printf(bp, "%12s", "") <= 0)
                     goto err;
                 obj = X509_EXTENSION_get_object(ex);
-                i2a_ASN1_OBJECT(bp, obj);
+                if (i2a_ASN1_OBJECT(bp, obj) <= 0)
+                    goto err;
                 critical = X509_EXTENSION_get_critical(ex);
                 if (BIO_printf(bp, ": %s\n", critical ? "critical" : "") <= 0)
                     goto err;
                 if (!X509V3_EXT_print(bp, ex, cflag, 16)) {
-                    BIO_printf(bp, "%16s", "");
-                    ASN1_STRING_print(bp, X509_EXTENSION_get_data(ex));
+                    if (BIO_printf(bp, "%16s", "") <= 0
+                        || ASN1_STRING_print(bp,
+                                             X509_EXTENSION_get_data(ex)) <= 0)
+                        goto err;
                 }
                 if (BIO_write(bp, "\n", 1) <= 0)
                     goto err;
@@ -222,17 +197,17 @@ int X509_REQ_print_ex(BIO *bp, X509_REQ *x, unsigned long nmflags,
     }
 
     if (!(cflag & X509_FLAG_NO_SIGDUMP)) {
-        X509_ALGOR *sig_alg;
-        ASN1_BIT_STRING *sig;
-        X509_REQ_get0_signature(&sig, &sig_alg, x);
+        const X509_ALGOR *sig_alg;
+        const ASN1_BIT_STRING *sig;
+        X509_REQ_get0_signature(x, &sig, &sig_alg);
         if (!X509_signature_print(bp, sig_alg, sig))
             goto err;
     }
 
-    return (1);
+    return 1;
  err:
     X509err(X509_F_X509_REQ_PRINT_EX, ERR_R_BUF_LIB);
-    return (0);
+    return 0;
 }
 
 int X509_REQ_print(BIO *bp, X509_REQ *x)

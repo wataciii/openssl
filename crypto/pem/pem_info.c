@@ -1,59 +1,17 @@
-/* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
- * All rights reserved.
+/*
+ * Copyright 1995-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * This package is an SSL implementation written
- * by Eric Young (eay@cryptsoft.com).
- * The implementation was written so as to conform with Netscapes SSL.
- *
- * This library is free for commercial and non-commercial use as long as
- * the following conditions are aheared to.  The following conditions
- * apply to all code found in this distribution, be it the RC4, RSA,
- * lhash, DES, etc., code; not just the SSL code.  The SSL documentation
- * included with this distribution is covered by the same copyright terms
- * except that the holder is Tim Hudson (tjh@cryptsoft.com).
- *
- * Copyright remains Eric Young's, and as such any Copyright notices in
- * the code are not to be removed.
- * If this package is used in a product, Eric Young should be given attribution
- * as the author of the parts of the library used.
- * This can be in the form of a textual message at program startup or
- * in documentation (online or textual) provided with the package.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. All advertising materials mentioning features or use of this software
- *    must display the following acknowledgement:
- *    "This product includes cryptographic software written by
- *     Eric Young (eay@cryptsoft.com)"
- *    The word 'cryptographic' can be left out if the rouines from the library
- *    being used are not cryptographic related :-).
- * 4. If you include any Windows specific code (or a derivative thereof) from
- *    the apps directory (application code) you must include an acknowledgement:
- *    "This product includes software written by Tim Hudson (tjh@cryptsoft.com)"
- *
- * THIS SOFTWARE IS PROVIDED BY ERIC YOUNG ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- *
- * The licence and distribution terms for any publically available version or
- * derivative of this code cannot be changed.  i.e. this code cannot simply be
- * copied and put under another distribution licence
- * [including the GNU Public Licence.]
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
+
+/*
+ * DSA low level APIs are deprecated for public use, but still ok for
+ * internal use.
+ */
+#include "internal/deprecated.h"
 
 #include <stdio.h>
 #include "internal/cryptlib.h"
@@ -65,26 +23,38 @@
 #include <openssl/rsa.h>
 #include <openssl/dsa.h>
 
+DEFINE_STACK_OF(X509_INFO)
+
 #ifndef OPENSSL_NO_STDIO
-STACK_OF(X509_INFO) *PEM_X509_INFO_read(FILE *fp, STACK_OF(X509_INFO) *sk,
-                                        pem_password_cb *cb, void *u)
+STACK_OF(X509_INFO)
+*PEM_X509_INFO_read_with_libctx(FILE *fp, STACK_OF(X509_INFO) *sk,
+                                pem_password_cb *cb, void *u,
+                                OPENSSL_CTX *libctx, const char *propq)
 {
     BIO *b;
     STACK_OF(X509_INFO) *ret;
 
     if ((b = BIO_new(BIO_s_file())) == NULL) {
-        PEMerr(PEM_F_PEM_X509_INFO_READ, ERR_R_BUF_LIB);
-        return (0);
+        PEMerr(0, ERR_R_BUF_LIB);
+        return 0;
     }
     BIO_set_fp(b, fp, BIO_NOCLOSE);
-    ret = PEM_X509_INFO_read_bio(b, sk, cb, u);
+    ret = PEM_X509_INFO_read_bio_with_libctx(b, sk, cb, u, libctx, propq);
     BIO_free(b);
-    return (ret);
+    return ret;
+}
+
+STACK_OF(X509_INFO) *PEM_X509_INFO_read(FILE *fp, STACK_OF(X509_INFO) *sk,
+                                        pem_password_cb *cb, void *u)
+{
+    return PEM_X509_INFO_read_with_libctx(fp, sk, cb, u, NULL, NULL);
 }
 #endif
 
-STACK_OF(X509_INFO) *PEM_X509_INFO_read_bio(BIO *bp, STACK_OF(X509_INFO) *sk,
-                                            pem_password_cb *cb, void *u)
+STACK_OF(X509_INFO)
+*PEM_X509_INFO_read_bio_with_libctx(BIO *bp, STACK_OF(X509_INFO) *sk,
+                                    pem_password_cb *cb, void *u,
+                                    OPENSSL_CTX *libctx, const char *propq)
 {
     X509_INFO *xi = NULL;
     char *name = NULL, *header = NULL;
@@ -99,7 +69,7 @@ STACK_OF(X509_INFO) *PEM_X509_INFO_read_bio(BIO *bp, STACK_OF(X509_INFO) *sk,
 
     if (sk == NULL) {
         if ((ret = sk_X509_INFO_new_null()) == NULL) {
-            PEMerr(PEM_F_PEM_X509_INFO_READ_BIO, ERR_R_MALLOC_FAILURE);
+            PEMerr(0, ERR_R_MALLOC_FAILURE);
             goto err;
         }
     } else
@@ -130,6 +100,9 @@ STACK_OF(X509_INFO) *PEM_X509_INFO_read_bio(BIO *bp, STACK_OF(X509_INFO) *sk,
                     goto err;
                 goto start;
             }
+            xi->x509 = X509_new_with_libctx(libctx, propq);
+            if (xi->x509 == NULL)
+                goto err;
             pp = &(xi->x509);
         } else if ((strcmp(name, PEM_STRING_X509_TRUSTED) == 0)) {
             d2i = (D2I_OF(void)) d2i_X509_AUX;
@@ -140,6 +113,9 @@ STACK_OF(X509_INFO) *PEM_X509_INFO_read_bio(BIO *bp, STACK_OF(X509_INFO) *sk,
                     goto err;
                 goto start;
             }
+            xi->x509 = X509_new_with_libctx(libctx, propq);
+            if (xi->x509 == NULL)
+                goto err;
             pp = &(xi->x509);
         } else if (strcmp(name, PEM_STRING_X509_CRL) == 0) {
             d2i = (D2I_OF(void)) d2i_X509_CRL;
@@ -237,11 +213,11 @@ STACK_OF(X509_INFO) *PEM_X509_INFO_read_bio(BIO *bp, STACK_OF(X509_INFO) *sk,
                 p = data;
                 if (ptype) {
                     if (!d2i_PrivateKey(ptype, pp, &p, len)) {
-                        PEMerr(PEM_F_PEM_X509_INFO_READ_BIO, ERR_R_ASN1_LIB);
+                        PEMerr(0, ERR_R_ASN1_LIB);
                         goto err;
                     }
                 } else if (d2i(pp, &p, len) == NULL) {
-                    PEMerr(PEM_F_PEM_X509_INFO_READ_BIO, ERR_R_ASN1_LIB);
+                    PEMerr(0, ERR_R_ASN1_LIB);
                     goto err;
                 }
             } else {            /* encrypted RSA data */
@@ -288,23 +264,35 @@ STACK_OF(X509_INFO) *PEM_X509_INFO_read_bio(BIO *bp, STACK_OF(X509_INFO) *sk,
     OPENSSL_free(name);
     OPENSSL_free(header);
     OPENSSL_free(data);
-    return (ret);
+    return ret;
+}
+
+STACK_OF(X509_INFO) *PEM_X509_INFO_read_bio(BIO *bp, STACK_OF(X509_INFO) *sk,
+                                            pem_password_cb *cb, void *u)
+{
+    return PEM_X509_INFO_read_bio_with_libctx(bp, sk, cb, u, NULL, NULL);
 }
 
 /* A TJH addition */
-int PEM_X509_INFO_write_bio(BIO *bp, X509_INFO *xi, EVP_CIPHER *enc,
-                            unsigned char *kstr, int klen,
+int PEM_X509_INFO_write_bio(BIO *bp, const X509_INFO *xi, EVP_CIPHER *enc,
+                            const unsigned char *kstr, int klen,
                             pem_password_cb *cb, void *u)
 {
     int i, ret = 0;
     unsigned char *data = NULL;
     const char *objstr = NULL;
     char buf[PEM_BUFSIZE];
-    unsigned char *iv = NULL;
+    const unsigned char *iv = NULL;
 
     if (enc != NULL) {
         objstr = OBJ_nid2sn(EVP_CIPHER_nid(enc));
-        if (objstr == NULL) {
+        if (objstr == NULL
+                   /*
+                    * Check "Proc-Type: 4,Encrypted\nDEK-Info: objstr,hex-iv\n"
+                    * fits into buf
+                    */
+                || (strlen(objstr) + 23 + 2 * EVP_CIPHER_iv_length(enc) + 13)
+                   > sizeof(buf)) {
             PEMerr(PEM_F_PEM_X509_INFO_WRITE_BIO, PEM_R_UNSUPPORTED_CIPHER);
             goto err;
         }
@@ -339,14 +327,11 @@ int PEM_X509_INFO_write_bio(BIO *bp, X509_INFO *xi, EVP_CIPHER *enc,
                 goto err;
             }
 
-            /* create the right magic header stuff */
-            OPENSSL_assert(strlen(objstr) + 23
-                           + 2 * EVP_CIPHER_iv_length(enc) + 13 <=
-                           sizeof buf);
+            /* Create the right magic header stuff */
             buf[0] = '\0';
             PEM_proc_type(buf, PEM_TYPE_ENCRYPTED);
             PEM_dek_info(buf, objstr, EVP_CIPHER_iv_length(enc),
-                         (char *)iv);
+                         (const char *)iv);
 
             /* use the normal code to write things out */
             i = PEM_write_bio(bp, PEM_STRING_RSA, buf, data, i);
@@ -378,5 +363,5 @@ int PEM_X509_INFO_write_bio(BIO *bp, X509_INFO *xi, EVP_CIPHER *enc,
 
  err:
     OPENSSL_cleanse(buf, PEM_BUFSIZE);
-    return (ret);
+    return ret;
 }

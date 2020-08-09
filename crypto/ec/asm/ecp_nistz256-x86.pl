@@ -1,4 +1,11 @@
-#!/usr/bin/env perl
+#! /usr/bin/env perl
+# Copyright 2015-2020 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+
 
 # ====================================================================
 # Written by Andy Polyakov <appro@openssl.org> for the OpenSSL
@@ -35,10 +42,9 @@ $0 =~ m/(.*[\/\\])[^\/\\]+$/; $dir=$1;
 push(@INC,"${dir}","${dir}../../perlasm");
 require "x86asm.pl";
 
-$output=pop;
-open STDOUT,">$output";
+$output=pop and open STDOUT,">$output";
 
-&asm_init($ARGV[0],"ecp_nistz256-x86.pl",$ARGV[$#ARGV] eq "386");
+&asm_init($ARGV[0],$ARGV[$#ARGV] eq "386");
 
 $sse2=0;
 for (@ARGV) { $sse2=1 if (/-DOPENSSL_IA32_SSE2/); }
@@ -277,18 +283,41 @@ for(1..37) {
 	&mov	(&DWP(16,"edi"),"eax");
 	&adc	("ecx",&DWP(24,"ebp"));
 	&mov	(&DWP(20,"edi"),"ebx");
+	&mov	("esi",0);
 	&adc	("edx",&DWP(28,"ebp"));
 	&mov	(&DWP(24,"edi"),"ecx");
-	&sbb	("esi","esi");			# broadcast carry bit
+	&adc	("esi",0);
 	&mov	(&DWP(28,"edi"),"edx");
 
-	# if a+b carries, subtract modulus.
+	# if a+b >= modulus, subtract modulus.
 	#
+	# But since comparison implies subtraction, we subtract modulus
+	# to see if it borrows, and then subtract it for real if
+	# subtraction didn't borrow.
+
+	&mov	("eax",&DWP(0,"edi"));
+	&mov	("ebx",&DWP(4,"edi"));
+	&mov	("ecx",&DWP(8,"edi"));
+	&sub	("eax",-1);
+	&mov	("edx",&DWP(12,"edi"));
+	&sbb	("ebx",-1);
+	&mov	("eax",&DWP(16,"edi"));
+	&sbb	("ecx",-1);
+	&mov	("ebx",&DWP(20,"edi"));
+	&sbb	("edx",0);
+	&mov	("ecx",&DWP(24,"edi"));
+	&sbb	("eax",0);
+	&mov	("edx",&DWP(28,"edi"));
+	&sbb	("ebx",0);
+	&sbb	("ecx",1);
+	&sbb	("edx",-1);
+	&sbb	("esi",0);
+
 	# Note that because mod has special form, i.e. consists of
 	# 0xffffffff, 1 and 0s, we can conditionally synthesize it by
-	# assigning carry bit to one register, %ebp, and its negative
-	# to another, %esi. But we started by calculating %esi...
+	# by using borrow.
 
+	&not	("esi");
 	&mov	("eax",&DWP(0,"edi"));
 	&mov	("ebp","esi");
 	&mov	("ebx",&DWP(4,"edi"));
@@ -413,7 +442,7 @@ for(1..37) {
 	&mov	(&DWP(20,"esp"),"eax");
 	&mov	(&DWP(24,"esp"),"eax");
 	&mov	(&DWP(28,"esp"),"eax");
-	
+
 	&call	("_ecp_nistz256_sub");
 
 	&stack_pop(8);
@@ -1149,7 +1178,7 @@ for ($i=0;$i<7;$i++) {
 	&mov	("esi",&wparam(1));
 	&mov	("ebp",&wparam(2));
 
-	&lea	("edi",&DWP(-1,"edi","ebp"));
+	&lea	("edi",&DWP(0,"edi","ebp"));
 	&mov	("ebp",64/4);
 &set_label("scatter_w7_loop");
 	&mov	("eax",&DWP(0,"esi"));
@@ -1358,7 +1387,7 @@ for ($i=0;$i<7;$i++) {
 
 	# above map() describes stack layout with 18 temporary
 	# 256-bit vectors on top, then we take extra words for
-	# !in1infty, !in2infty, result of check for zero and
+	# ~in1infty, ~in2infty, result of check for zero and
 	# OPENSSL_ia32cap_P copy. [one unused word for padding]
 	&stack_push(8*18+5);
 						if ($sse2) {
@@ -1375,21 +1404,21 @@ for ($i=0;$i<7;$i++) {
 	&mov	("edx",&DWP($i+12,"esi"));
 	&mov	(&DWP($i+0,"edi"),"eax");
 	&mov	(&DWP(32*18+12,"esp"),"ebp")	if ($i==0);
-	&mov	("ebp","eax")			if ($i==0);
-	&or	("ebp","eax")			if ($i!=0 && $i<64);
+	&mov	("ebp","eax")			if ($i==64);
+	&or	("ebp","eax")			if ($i>64);
 	&mov	(&DWP($i+4,"edi"),"ebx");
-	&or	("ebp","ebx")			if ($i<64);
+	&or	("ebp","ebx")			if ($i>=64);
 	&mov	(&DWP($i+8,"edi"),"ecx");
-	&or	("ebp","ecx")			if ($i<64);
+	&or	("ebp","ecx")			if ($i>=64);
 	&mov	(&DWP($i+12,"edi"),"edx");
-	&or	("ebp","edx")			if ($i<64);
+	&or	("ebp","edx")			if ($i>=64);
     }
 	&xor	("eax","eax");
 	&mov	("esi",&wparam(1));
 	&sub	("eax","ebp");
 	&or	("ebp","eax");
 	&sar	("ebp",31);
-	&mov	(&DWP(32*18+4,"esp"),"ebp");	# !in2infty
+	&mov	(&DWP(32*18+4,"esp"),"ebp");	# ~in2infty
 
 	&lea	("edi",&DWP($in1_x,"esp"));
     for($i=0;$i<96;$i+=16) {
@@ -1398,20 +1427,20 @@ for ($i=0;$i<7;$i++) {
 	&mov	("ecx",&DWP($i+8,"esi"));
 	&mov	("edx",&DWP($i+12,"esi"));
 	&mov	(&DWP($i+0,"edi"),"eax");
-	&mov	("ebp","eax")			if ($i==0);
-	&or	("ebp","eax")			if ($i!=0 && $i<64);
+	&mov	("ebp","eax")			if ($i==64);
+	&or	("ebp","eax")			if ($i>64);
 	&mov	(&DWP($i+4,"edi"),"ebx");
-	&or	("ebp","ebx")			if ($i<64);
+	&or	("ebp","ebx")			if ($i>=64);
 	&mov	(&DWP($i+8,"edi"),"ecx");
-	&or	("ebp","ecx")			if ($i<64);
+	&or	("ebp","ecx")			if ($i>=64);
 	&mov	(&DWP($i+12,"edi"),"edx");
-	&or	("ebp","edx")			if ($i<64);
+	&or	("ebp","edx")			if ($i>=64);
     }
 	&xor	("eax","eax");
 	&sub	("eax","ebp");
 	&or	("ebp","eax");
 	&sar	("ebp",31);
-	&mov	(&DWP(32*18+0,"esp"),"ebp");	# !in1infty
+	&mov	(&DWP(32*18+0,"esp"),"ebp");	# ~in1infty
 
 	&mov	("eax",&DWP(32*18+12,"esp"));	# OPENSSL_ia32cap_P copy
 	&lea	("esi",&DWP($in2_z,"esp"));
@@ -1486,23 +1515,19 @@ for ($i=0;$i<7;$i++) {
 	&or	("eax",&DWP(0,"edi"));
 	&or	("eax",&DWP(4,"edi"));
 	&or	("eax",&DWP(8,"edi"));
-	&or	("eax",&DWP(12,"edi"));
+	&or	("eax",&DWP(12,"edi"));		# ~is_equal(U1,U2)
 
+	&mov	("ebx",&DWP(32*18+0,"esp"));	# ~in1infty
+	&not	("ebx");			# -1/0 -> 0/-1
+	&or	("eax","ebx");
+	&mov	("ebx",&DWP(32*18+4,"esp"));	# ~in2infty
+	&not	("ebx");			# -1/0 -> 0/-1
+	&or	("eax","ebx");
+	&or	("eax",&DWP(32*18+8,"esp"));	# ~is_equal(S1,S2)
+
+	# if (~is_equal(U1,U2) | in1infty | in2infty | ~is_equal(S1,S2))
 	&data_byte(0x3e);			# predict taken
-	&jnz	(&label("add_proceed"));	# is_equal(U1,U2)?
-
-	&mov	("eax",&DWP(32*18+0,"esp"));
-	&and	("eax",&DWP(32*18+4,"esp"));
-	&mov	("ebx",&DWP(32*18+8,"esp"));
-	&jz	(&label("add_proceed"));	# (in1infty || in2infty)?
-	&test	("ebx","ebx");
-	&jz	(&label("add_double"));		# is_equal(S1,S2)?
-
-	&mov	("edi",&wparam(0));
-	&xor	("eax","eax");
-	&mov	("ecx",96/4);
-	&data_byte(0xfc,0xf3,0xab);		# cld; stosd
-	&jmp	(&label("add_done"));
+	&jnz	(&label("add_proceed"));
 
 &set_label("add_double",16);
 	&mov	("esi",&wparam(1));
@@ -1584,34 +1609,34 @@ for ($i=0;$i<7;$i++) {
 	&lea	("edi",&DWP($res_y,"esp"));
 	&call	("_ecp_nistz256_sub");		# p256_sub(res_y, res_y, S2);
 
-	&mov	("ebp",&DWP(32*18+0,"esp"));	# !in1infty
-	&mov	("esi",&DWP(32*18+4,"esp"));	# !in2infty
+	&mov	("ebp",&DWP(32*18+0,"esp"));	# ~in1infty
+	&mov	("esi",&DWP(32*18+4,"esp"));	# ~in2infty
 	&mov	("edi",&wparam(0));
 	&mov	("edx","ebp");
 	&not	("ebp");
-	&and	("edx","esi");
-	&and	("ebp","esi");
-	&not	("esi");
+	&and	("edx","esi");			# ~in1infty & ~in2infty
+	&and	("ebp","esi");			# in1infty & ~in2infty
+	&not	("esi");			# in2infty
 
 	########################################
 	# conditional moves
     for($i=64;$i<96;$i+=4) {
-	&mov	("eax","edx");
+	&mov	("eax","edx");			# ~in1infty & ~in2infty
 	&and	("eax",&DWP($res_x+$i,"esp"));
-	&mov	("ebx","ebp");
+	&mov	("ebx","ebp");			# in1infty & ~in2infty
 	&and	("ebx",&DWP($in2_x+$i,"esp"));
-	&mov	("ecx","esi");
+	&mov	("ecx","esi");			# in2infty
 	&and	("ecx",&DWP($in1_x+$i,"esp"));
 	&or	("eax","ebx");
 	&or	("eax","ecx");
 	&mov	(&DWP($i,"edi"),"eax");
     }
     for($i=0;$i<64;$i+=4) {
-	&mov	("eax","edx");
+	&mov	("eax","edx");			# ~in1infty & ~in2infty
 	&and	("eax",&DWP($res_x+$i,"esp"));
-	&mov	("ebx","ebp");
+	&mov	("ebx","ebp");			# in1infty & ~in2infty
 	&and	("ebx",&DWP($in2_x+$i,"esp"));
-	&mov	("ecx","esi");
+	&mov	("ecx","esi");			# in2infty
 	&and	("ecx",&DWP($in1_x+$i,"esp"));
 	&or	("eax","ebx");
 	&or	("eax","ecx");
@@ -1638,7 +1663,7 @@ for ($i=0;$i<7;$i++) {
 
 	# above map() describes stack layout with 15 temporary
 	# 256-bit vectors on top, then we take extra words for
-	# !in1infty, !in2infty, and OPENSSL_ia32cap_P copy.
+	# ~in1infty, ~in2infty, and OPENSSL_ia32cap_P copy.
 	&stack_push(8*15+3);
 						if ($sse2) {
 	&call	("_picup_eax");
@@ -1654,21 +1679,21 @@ for ($i=0;$i<7;$i++) {
 	&mov	("edx",&DWP($i+12,"esi"));
 	&mov	(&DWP($i+0,"edi"),"eax");
 	&mov	(&DWP(32*15+8,"esp"),"ebp")	if ($i==0);
-	&mov	("ebp","eax")			if ($i==0);
-	&or	("ebp","eax")			if ($i!=0 && $i<64);
+	&mov	("ebp","eax")			if ($i==64);
+	&or	("ebp","eax")			if ($i>64);
 	&mov	(&DWP($i+4,"edi"),"ebx");
-	&or	("ebp","ebx")			if ($i<64);
+	&or	("ebp","ebx")			if ($i>=64);
 	&mov	(&DWP($i+8,"edi"),"ecx");
-	&or	("ebp","ecx")			if ($i<64);
+	&or	("ebp","ecx")			if ($i>=64);
 	&mov	(&DWP($i+12,"edi"),"edx");
-	&or	("ebp","edx")			if ($i<64);
+	&or	("ebp","edx")			if ($i>=64);
     }
 	&xor	("eax","eax");
 	&mov	("esi",&wparam(2));
 	&sub	("eax","ebp");
 	&or	("ebp","eax");
 	&sar	("ebp",31);
-	&mov	(&DWP(32*15+0,"esp"),"ebp");	# !in1infty
+	&mov	(&DWP(32*15+0,"esp"),"ebp");	# ~in1infty
 
 	&lea	("edi",&DWP($in2_x,"esp"));
     for($i=0;$i<64;$i+=16) {
@@ -1694,7 +1719,7 @@ for ($i=0;$i<7;$i++) {
 	 &lea	("ebp",&DWP($in1_z,"esp"));
 	&sar	("ebx",31);
 	 &lea	("edi",&DWP($Z1sqr,"esp"));
-	&mov	(&DWP(32*15+4,"esp"),"ebx");	# !in2infty
+	&mov	(&DWP(32*15+4,"esp"),"ebx");	# ~in2infty
 
 	&call	("_ecp_nistz256_mul_mont");	# p256_sqr_mont(Z1sqr, in1_z);
 
@@ -1793,14 +1818,14 @@ for ($i=0;$i<7;$i++) {
 	&lea	("edi",&DWP($res_y,"esp"));
 	&call	("_ecp_nistz256_sub");		# p256_sub(res_y, res_y, S2);
 
-	&mov	("ebp",&DWP(32*15+0,"esp"));	# !in1infty
-	&mov	("esi",&DWP(32*15+4,"esp"));	# !in2infty
+	&mov	("ebp",&DWP(32*15+0,"esp"));	# ~in1infty
+	&mov	("esi",&DWP(32*15+4,"esp"));	# ~in2infty
 	&mov	("edi",&wparam(0));
 	&mov	("edx","ebp");
 	&not	("ebp");
-	&and	("edx","esi");
-	&and	("ebp","esi");
-	&not	("esi");
+	&and	("edx","esi");			# ~in1infty & ~in2infty
+	&and	("ebp","esi");			# in1infty & ~in2infty
+	&not	("esi");			# in2infty
 
 	########################################
 	# conditional moves
@@ -1818,11 +1843,11 @@ for ($i=0;$i<7;$i++) {
 	&mov	(&DWP($i,"edi"),"eax");
     }
     for($i=0;$i<64;$i+=4) {
-	&mov	("eax","edx");
+	&mov	("eax","edx");			# ~in1infty & ~in2infty
 	&and	("eax",&DWP($res_x+$i,"esp"));
-	&mov	("ebx","ebp");
+	&mov	("ebx","ebp");			# in1infty & ~in2infty
 	&and	("ebx",&DWP($in2_x+$i,"esp"));
-	&mov	("ecx","esi");
+	&mov	("ecx","esi");			# in2infty
 	&and	("ecx",&DWP($in1_x+$i,"esp"));
 	&or	("eax","ebx");
 	&or	("eax","ecx");
@@ -1833,4 +1858,4 @@ for ($i=0;$i<7;$i++) {
 
 &asm_finish();
 
-close STDOUT;
+close STDOUT or die "error closing STDOUT: $!";

@@ -1,61 +1,17 @@
-/* ====================================================================
- * Copyright (c) 2001 The OpenSSL Project.  All rights reserved.
+/*
+ * Copyright 2001-2018 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 #include "internal/cryptlib.h"
 #include <openssl/evp.h>
 #include <openssl/lhash.h>
-#include "eng_int.h"
+#include <openssl/trace.h>
+#include "eng_local.h"
 
 /* The type of the items in the table */
 struct st_engine_pile {
@@ -71,7 +27,7 @@ struct st_engine_pile {
     int uptodate;
 };
 
-/* The type exposed in eng_int.h */
+/* The type exposed in eng_local.h */
 struct st_engine_table {
     LHASH_OF(ENGINE_PILE) piles;
 };                              /* ENGINE_TABLE */
@@ -121,7 +77,7 @@ static int int_table_check(ENGINE_TABLE **t, int create)
 }
 
 /*
- * Privately exposed (via eng_int.h) functions for adding and/or removing
+ * Privately exposed (via eng_local.h) functions for adding and/or removing
  * ENGINEs from the implementation table
  */
 int engine_table_register(ENGINE_TABLE **table, ENGINE_CLEANUP_CB *cleanup,
@@ -154,6 +110,11 @@ int engine_table_register(ENGINE_TABLE **table, ENGINE_CLEANUP_CB *cleanup,
             }
             fnd->funct = NULL;
             (void)lh_ENGINE_PILE_insert(&(*table)->piles, fnd);
+            if (lh_ENGINE_PILE_retrieve(&(*table)->piles, &tmplate) != fnd) {
+                sk_ENGINE_free(fnd->sk);
+                OPENSSL_free(fnd);
+                goto end;
+            }
         }
         /* A registration shouldn't add duplicate entries */
         (void)sk_ENGINE_delete_ptr(fnd->sk, e);
@@ -209,7 +170,7 @@ void engine_table_unregister(ENGINE_TABLE **table, ENGINE *e)
 
 static void int_cleanup_cb_doall(ENGINE_PILE *p)
 {
-    if (!p)
+    if (p == NULL)
         return;
     sk_ENGINE_free(p->sk);
     if (p->funct)
@@ -229,29 +190,27 @@ void engine_table_cleanup(ENGINE_TABLE **table)
 }
 
 /* return a functional reference for a given 'nid' */
-#ifndef ENGINE_TABLE_DEBUG
-ENGINE *engine_table_select(ENGINE_TABLE **table, int nid)
-#else
-ENGINE *engine_table_select_tmp(ENGINE_TABLE **table, int nid, const char *f,
+ENGINE *engine_table_select_int(ENGINE_TABLE **table, int nid, const char *f,
                                 int l)
-#endif
 {
     ENGINE *ret = NULL;
     ENGINE_PILE tmplate, *fnd = NULL;
     int initres, loop = 0;
 
+    /* Load the config before trying to check if engines are available */
+    OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CONFIG, NULL);
+
     if (!(*table)) {
-#ifdef ENGINE_TABLE_DEBUG
-        fprintf(stderr, "engine_table_dbg: %s:%d, nid=%d, nothing "
-                "registered!\n", f, l, nid);
-#endif
+        OSSL_TRACE3(ENGINE_TABLE,
+                   "%s:%d, nid=%d, nothing registered!\n",
+                   f, l, nid);
         return NULL;
     }
     ERR_set_mark();
     CRYPTO_THREAD_write_lock(global_engine_lock);
     /*
      * Check again inside the lock otherwise we could race against cleanup
-     * operations. But don't worry about a fprintf(stderr).
+     * operations. But don't worry about a debug printout
      */
     if (!int_table_check(table, 0))
         goto end;
@@ -260,10 +219,9 @@ ENGINE *engine_table_select_tmp(ENGINE_TABLE **table, int nid, const char *f,
     if (!fnd)
         goto end;
     if (fnd->funct && engine_unlocked_init(fnd->funct)) {
-#ifdef ENGINE_TABLE_DEBUG
-        fprintf(stderr, "engine_table_dbg: %s:%d, nid=%d, using "
-                "ENGINE '%s' cached\n", f, l, nid, fnd->funct->id);
-#endif
+        OSSL_TRACE4(ENGINE_TABLE,
+                   "%s:%d, nid=%d, using ENGINE '%s' cached\n",
+                   f, l, nid, fnd->funct->id);
         ret = fnd->funct;
         goto end;
     }
@@ -274,10 +232,10 @@ ENGINE *engine_table_select_tmp(ENGINE_TABLE **table, int nid, const char *f,
  trynext:
     ret = sk_ENGINE_value(fnd->sk, loop++);
     if (!ret) {
-#ifdef ENGINE_TABLE_DEBUG
-        fprintf(stderr, "engine_table_dbg: %s:%d, nid=%d, no "
-                "registered implementations would initialise\n", f, l, nid);
-#endif
+        OSSL_TRACE3(ENGINE_TABLE,
+                    "%s:%d, nid=%d, "
+                    "no registered implementations would initialise\n",
+                    f, l, nid);
         goto end;
     }
     /* Try to initialise the ENGINE? */
@@ -292,15 +250,13 @@ ENGINE *engine_table_select_tmp(ENGINE_TABLE **table, int nid, const char *f,
             if (fnd->funct)
                 engine_unlocked_finish(fnd->funct, 0);
             fnd->funct = ret;
-#ifdef ENGINE_TABLE_DEBUG
-            fprintf(stderr, "engine_table_dbg: %s:%d, nid=%d, "
-                    "setting default to '%s'\n", f, l, nid, ret->id);
-#endif
+            OSSL_TRACE4(ENGINE_TABLE,
+                        "%s:%d, nid=%d, setting default to '%s'\n",
+                        f, l, nid, ret->id);
         }
-#ifdef ENGINE_TABLE_DEBUG
-        fprintf(stderr, "engine_table_dbg: %s:%d, nid=%d, using "
-                "newly initialised '%s'\n", f, l, nid, ret->id);
-#endif
+        OSSL_TRACE4(ENGINE_TABLE,
+                    "%s:%d, nid=%d, using newly initialised '%s'\n",
+                    f, l, nid, ret->id);
         goto end;
     }
     goto trynext;
@@ -311,14 +267,14 @@ ENGINE *engine_table_select_tmp(ENGINE_TABLE **table, int nid, const char *f,
      */
     if (fnd)
         fnd->uptodate = 1;
-#ifdef ENGINE_TABLE_DEBUG
     if (ret)
-        fprintf(stderr, "engine_table_dbg: %s:%d, nid=%d, caching "
-                "ENGINE '%s'\n", f, l, nid, ret->id);
+        OSSL_TRACE4(ENGINE_TABLE,
+                   "%s:%d, nid=%d, caching ENGINE '%s'\n",
+                   f, l, nid, ret->id);
     else
-        fprintf(stderr, "engine_table_dbg: %s:%d, nid=%d, caching "
-                "'no matching ENGINE'\n", f, l, nid);
-#endif
+        OSSL_TRACE3(ENGINE_TABLE,
+                    "%s:%d, nid=%d, caching 'no matching ENGINE'\n",
+                    f, l, nid);
     CRYPTO_THREAD_unlock(global_engine_lock);
     /*
      * Whatever happened, any failed init()s are not failures in this

@@ -1,63 +1,19 @@
 /*
- * Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL project
- * 2006
+ * Copyright 2006-2020 The OpenSSL Project Authors. All Rights Reserved.
+ *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
-/* ====================================================================
- * Copyright (c) 2006 The OpenSSL Project.  All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
- */
+
+/* We need to use some engine deprecated APIs */
+#define OPENSSL_SUPPRESS_DEPRECATED
+
 #include <stdio.h>
 #include <string.h>
 #include "apps.h"
+#include "progs.h"
 #include <openssl/pem.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
@@ -71,24 +27,31 @@ static int genpkey_cb(EVP_PKEY_CTX *ctx);
 typedef enum OPTION_choice {
     OPT_ERR = -1, OPT_EOF = 0, OPT_HELP,
     OPT_ENGINE, OPT_OUTFORM, OPT_OUT, OPT_PASS, OPT_PARAMFILE,
-    OPT_ALGORITHM, OPT_PKEYOPT, OPT_GENPARAM, OPT_TEXT, OPT_CIPHER
+    OPT_ALGORITHM, OPT_PKEYOPT, OPT_GENPARAM, OPT_TEXT, OPT_CIPHER,
+    OPT_PROV_ENUM
 } OPTION_CHOICE;
 
-OPTIONS genpkey_options[] = {
+const OPTIONS genpkey_options[] = {
+    OPT_SECTION("General"),
     {"help", OPT_HELP, '-', "Display this summary"},
-    {"out", OPT_OUT, '>', "Output file"},
-    {"outform", OPT_OUTFORM, 'F', "output format (DER or PEM)"},
-    {"pass", OPT_PASS, 's', "Output file pass phrase source"},
+#ifndef OPENSSL_NO_ENGINE
+    {"engine", OPT_ENGINE, 's', "Use engine, possibly a hardware device"},
+#endif
     {"paramfile", OPT_PARAMFILE, '<', "Parameters file"},
     {"algorithm", OPT_ALGORITHM, 's', "The public key algorithm"},
     {"pkeyopt", OPT_PKEYOPT, 's',
      "Set the public key algorithm option as opt:value"},
+
+    OPT_SECTION("Output"),
+    {"out", OPT_OUT, '>', "Output file"},
+    {"outform", OPT_OUTFORM, 'F', "output format (DER or PEM)"},
+    {"pass", OPT_PASS, 's', "Output file pass phrase source"},
     {"genparam", OPT_GENPARAM, '-', "Generate parameters, not key"},
     {"text", OPT_TEXT, '-', "Print the in text"},
     {"", OPT_CIPHER, '-', "Cipher to use to encrypt the key"},
-#ifndef OPENSSL_NO_ENGINE
-    {"engine", OPT_ENGINE, 's', "Use engine, possibly a hardware device"},
-#endif
+
+    OPT_PROV_OPTIONS,
+
     /* This is deliberately last. */
     {OPT_HELP_STR, 1, 1,
      "Order of options may be important!  See the documentation.\n"},
@@ -167,6 +130,18 @@ int genpkey_main(int argc, char **argv)
             if (!opt_cipher(opt_unknown(), &cipher)
                 || do_param == 1)
                 goto opthelp;
+            if (EVP_CIPHER_mode(cipher) == EVP_CIPH_GCM_MODE ||
+                EVP_CIPHER_mode(cipher) == EVP_CIPH_CCM_MODE ||
+                EVP_CIPHER_mode(cipher) == EVP_CIPH_XTS_MODE ||
+                EVP_CIPHER_mode(cipher) == EVP_CIPH_OCB_MODE) {
+                BIO_printf(bio_err, "%s: cipher mode not supported\n", prog);
+                goto end;
+            }
+            break;
+        case OPT_PROV_CASES:
+            if (!opt_provider(o))
+                goto end;
+            break;
         }
     }
     argc = opt_num_rest();
@@ -204,9 +179,9 @@ int genpkey_main(int argc, char **argv)
         }
     }
 
-    if (do_param)
+    if (do_param) {
         rv = PEM_write_bio_Parameters(out, pkey);
-    else if (outformat == FORMAT_PEM) {
+    } else if (outformat == FORMAT_PEM) {
         assert(private);
         rv = PEM_write_bio_PrivateKey(out, pkey, cipher, NULL, 0, NULL, pass);
     } else if (outformat == FORMAT_ASN1) {
@@ -217,9 +192,12 @@ int genpkey_main(int argc, char **argv)
         goto end;
     }
 
+    ret = 0;
+
     if (rv <= 0) {
         BIO_puts(bio_err, "Error writing key\n");
         ERR_print_errors(bio_err);
+        ret = 1;
     }
 
     if (text) {
@@ -231,18 +209,17 @@ int genpkey_main(int argc, char **argv)
         if (rv <= 0) {
             BIO_puts(bio_err, "Error printing key\n");
             ERR_print_errors(bio_err);
+            ret = 1;
         }
     }
-
-    ret = 0;
 
  end:
     EVP_PKEY_free(pkey);
     EVP_PKEY_CTX_free(ctx);
     BIO_free_all(out);
     BIO_free(in);
+    release_engine(e);
     OPENSSL_free(pass);
-
     return ret;
 }
 
@@ -257,7 +234,7 @@ static int init_keygen_file(EVP_PKEY_CTX **pctx, const char *file, ENGINE *e)
     }
 
     pbio = BIO_new_file(file, "r");
-    if (!pbio) {
+    if (pbio == NULL) {
         BIO_printf(bio_err, "Can't open parameter file %s\n", file);
         return 0;
     }
@@ -265,7 +242,7 @@ static int init_keygen_file(EVP_PKEY_CTX **pctx, const char *file, ENGINE *e)
     pkey = PEM_read_bio_Parameters(pbio, NULL);
     BIO_free(pbio);
 
-    if (!pkey) {
+    if (pkey == NULL) {
         BIO_printf(bio_err, "Error reading parameter file %s\n", file);
         return 0;
     }
@@ -303,7 +280,7 @@ int init_gen_str(EVP_PKEY_CTX **pctx,
 
     ameth = EVP_PKEY_asn1_find_str(&tmpeng, algname, -1);
 
-#ifndef OPENSSL_NO_ENGINE
+#if !defined(OPENSSL_NO_ENGINE) && !defined(OPENSSL_NO_DEPRECATED_3_0)
     if (!ameth && e)
         ameth = ENGINE_get_pkey_asn1_meth_str(e, algname, -1);
 #endif
@@ -316,7 +293,7 @@ int init_gen_str(EVP_PKEY_CTX **pctx,
     ERR_clear_error();
 
     EVP_PKEY_asn1_get0_info(&pkey_id, NULL, NULL, NULL, NULL, ameth);
-#ifndef OPENSSL_NO_ENGINE
+#if !defined(OPENSSL_NO_ENGINE) && !defined(OPENSSL_NO_DEPRECATED_3_0)
     ENGINE_finish(tmpeng);
 #endif
     ctx = EVP_PKEY_CTX_new_id(pkey_id, e);

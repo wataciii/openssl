@@ -1,66 +1,18 @@
 /*
- * Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL project
- * 1999.
- */
-/* ====================================================================
- * Copyright (c) 1999 The OpenSSL Project.  All rights reserved.
+ * Copyright 1999-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 #include <stdio.h>
-#include <ctype.h>
 #include "internal/cryptlib.h"
 #include <openssl/asn1.h>
 #include <openssl/objects.h>
+
+DEFINE_STACK_OF(ASN1_STRING_TABLE)
 
 static STACK_OF(ASN1_STRING_TABLE) *stable = NULL;
 static void st_free(ASN1_STRING_TABLE *tbl);
@@ -99,8 +51,9 @@ int ASN1_STRING_set_default_mask_asc(const char *p)
 {
     unsigned long mask;
     char *end;
+
     if (strncmp(p, "MASK:", 5) == 0) {
-        if (!p[5])
+        if (p[5] == '\0')
             return 0;
         mask = strtoul(p + 5, &end, 0);
         if (*end)
@@ -133,19 +86,20 @@ ASN1_STRING *ASN1_STRING_set_by_NID(ASN1_STRING **out,
     ASN1_STRING *str = NULL;
     unsigned long mask;
     int ret;
-    if (!out)
+
+    if (out == NULL)
         out = &str;
     tbl = ASN1_STRING_TABLE_get(nid);
-    if (tbl) {
+    if (tbl != NULL) {
         mask = tbl->mask;
         if (!(tbl->flags & STABLE_NO_MASK))
             mask &= global_mask;
         ret = ASN1_mbstring_ncopy(out, in, inlen, inform, mask,
                                   tbl->minsize, tbl->maxsize);
-    } else
-        ret =
-            ASN1_mbstring_copy(out, in, inlen, inform,
-                               DIRSTRING_TYPE & global_mask);
+    } else {
+        ret = ASN1_mbstring_copy(out, in, inlen, inform,
+                                 DIRSTRING_TYPE & global_mask);
+    }
     if (ret <= 0)
         return NULL;
     return *out;
@@ -155,47 +109,7 @@ ASN1_STRING *ASN1_STRING_set_by_NID(ASN1_STRING **out,
  * Now the tables and helper functions for the string table:
  */
 
-/* size limits: this stuff is taken straight from RFC3280 */
-
-#define ub_name                         32768
-#define ub_common_name                  64
-#define ub_locality_name                128
-#define ub_state_name                   128
-#define ub_organization_name            64
-#define ub_organization_unit_name       64
-#define ub_title                        64
-#define ub_email_address                128
-#define ub_serial_number                64
-
-/* This table must be kept in NID order */
-
-static const ASN1_STRING_TABLE tbl_standard[] = {
-    {NID_commonName, 1, ub_common_name, DIRSTRING_TYPE, 0},
-    {NID_countryName, 2, 2, B_ASN1_PRINTABLESTRING, STABLE_NO_MASK},
-    {NID_localityName, 1, ub_locality_name, DIRSTRING_TYPE, 0},
-    {NID_stateOrProvinceName, 1, ub_state_name, DIRSTRING_TYPE, 0},
-    {NID_organizationName, 1, ub_organization_name, DIRSTRING_TYPE, 0},
-    {NID_organizationalUnitName, 1, ub_organization_unit_name, DIRSTRING_TYPE,
-     0},
-    {NID_pkcs9_emailAddress, 1, ub_email_address, B_ASN1_IA5STRING,
-     STABLE_NO_MASK},
-    {NID_pkcs9_unstructuredName, 1, -1, PKCS9STRING_TYPE, 0},
-    {NID_pkcs9_challengePassword, 1, -1, PKCS9STRING_TYPE, 0},
-    {NID_pkcs9_unstructuredAddress, 1, -1, DIRSTRING_TYPE, 0},
-    {NID_givenName, 1, ub_name, DIRSTRING_TYPE, 0},
-    {NID_surname, 1, ub_name, DIRSTRING_TYPE, 0},
-    {NID_initials, 1, ub_name, DIRSTRING_TYPE, 0},
-    {NID_serialNumber, 1, ub_serial_number, B_ASN1_PRINTABLESTRING,
-     STABLE_NO_MASK},
-    {NID_friendlyName, -1, -1, B_ASN1_BMPSTRING, STABLE_NO_MASK},
-    {NID_name, 1, ub_name, DIRSTRING_TYPE, 0},
-    {NID_dnQualifier, -1, -1, B_ASN1_PRINTABLESTRING, STABLE_NO_MASK},
-    {NID_domainComponent, 1, -1, B_ASN1_IA5STRING, STABLE_NO_MASK},
-    {NID_ms_csp_name, -1, -1, B_ASN1_BMPSTRING, STABLE_NO_MASK},
-    {NID_INN, 1, 12, B_ASN1_NUMERICSTRING, STABLE_NO_MASK},
-    {NID_OGRN, 1, 13, B_ASN1_NUMERICSTRING, STABLE_NO_MASK},
-    {NID_SNILS, 1, 11, B_ASN1_NUMERICSTRING, STABLE_NO_MASK}
-};
+#include "tbl_standard.h"
 
 static int sk_table_cmp(const ASN1_STRING_TABLE *const *a,
                         const ASN1_STRING_TABLE *const *b)
@@ -216,6 +130,10 @@ ASN1_STRING_TABLE *ASN1_STRING_TABLE_get(int nid)
 {
     int idx;
     ASN1_STRING_TABLE fnd;
+
+    /* "stable" can be impacted by config, so load the config file first */
+    OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CONFIG, NULL);
+
     fnd.nid = nid;
     if (stable) {
         idx = sk_ASN1_STRING_TABLE_find(stable, &fnd);
@@ -233,6 +151,7 @@ ASN1_STRING_TABLE *ASN1_STRING_TABLE_get(int nid)
 static ASN1_STRING_TABLE *stable_get(int nid)
 {
     ASN1_STRING_TABLE *tmp, *rv;
+
     /* Always need a string table so allocate one if NULL */
     if (stable == NULL) {
         stable = sk_ASN1_STRING_TABLE_new(sk_table_cmp);
@@ -240,25 +159,26 @@ static ASN1_STRING_TABLE *stable_get(int nid)
             return NULL;
     }
     tmp = ASN1_STRING_TABLE_get(nid);
-    if (tmp && tmp->flags & STABLE_FLAGS_MALLOC)
+    if (tmp != NULL && tmp->flags & STABLE_FLAGS_MALLOC)
         return tmp;
-    rv = OPENSSL_malloc(sizeof(*rv));
-    if (rv == NULL)
+    if ((rv = OPENSSL_zalloc(sizeof(*rv))) == NULL) {
+        ASN1err(ASN1_F_STABLE_GET, ERR_R_MALLOC_FAILURE);
         return NULL;
+    }
     if (!sk_ASN1_STRING_TABLE_push(stable, rv)) {
         OPENSSL_free(rv);
         return NULL;
     }
-    if (tmp) {
+    if (tmp != NULL) {
         rv->nid = tmp->nid;
         rv->minsize = tmp->minsize;
         rv->maxsize = tmp->maxsize;
         rv->mask = tmp->mask;
         rv->flags = tmp->flags | STABLE_FLAGS_MALLOC;
     } else {
+        rv->nid = nid;
         rv->minsize = -1;
         rv->maxsize = -1;
-        rv->mask = 0;
         rv->flags = STABLE_FLAGS_MALLOC;
     }
     return rv;
@@ -269,8 +189,9 @@ int ASN1_STRING_TABLE_add(int nid,
                           unsigned long flags)
 {
     ASN1_STRING_TABLE *tmp;
+
     tmp = stable_get(nid);
-    if (!tmp) {
+    if (tmp == NULL) {
         ASN1err(ASN1_F_ASN1_STRING_TABLE_ADD, ERR_R_MALLOC_FAILURE);
         return 0;
     }
@@ -288,8 +209,9 @@ int ASN1_STRING_TABLE_add(int nid,
 void ASN1_STRING_TABLE_cleanup(void)
 {
     STACK_OF(ASN1_STRING_TABLE) *tmp;
+
     tmp = stable;
-    if (!tmp)
+    if (tmp == NULL)
         return;
     stable = NULL;
     sk_ASN1_STRING_TABLE_pop_free(tmp, st_free);
@@ -300,32 +222,3 @@ static void st_free(ASN1_STRING_TABLE *tbl)
     if (tbl->flags & STABLE_FLAGS_MALLOC)
         OPENSSL_free(tbl);
 }
-
-
-#ifdef STRING_TABLE_TEST
-
-main()
-{
-    ASN1_STRING_TABLE *tmp;
-    int i, last_nid = -1;
-
-    for (tmp = tbl_standard, i = 0; i < OSSL_NELEM(tbl_standard); i++, tmp++) {
-        if (tmp->nid < last_nid) {
-            last_nid = 0;
-            break;
-        }
-        last_nid = tmp->nid;
-    }
-
-    if (last_nid != 0) {
-        printf("Table order OK\n");
-        exit(0);
-    }
-
-    for (tmp = tbl_standard, i = 0; i < OSSL_NELEM(tbl_standard); i++, tmp++)
-        printf("Index %d, NID %d, Name=%s\n", i, tmp->nid,
-               OBJ_nid2ln(tmp->nid));
-
-}
-
-#endif

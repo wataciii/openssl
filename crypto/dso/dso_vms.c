@@ -1,62 +1,13 @@
 /*
- * Written by Richard Levitte (richard@levitte.org) for the OpenSSL project
- * 2000.
- */
-/* ====================================================================
- * Copyright (c) 2000 The OpenSSL Project.  All rights reserved.
+ * Copyright 2000-2016 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
-#include "dso_locl.h"
+#include "dso_local.h"
 
 #ifdef OPENSSL_SYS_VMS
 
@@ -64,6 +15,7 @@
 # include <errno.h>
 # include <rms.h>
 # include <lib$routines.h>
+# include <libfisdef.h>
 # include <stsdef.h>
 # include <descrip.h>
 # include <starlet.h>
@@ -84,7 +36,6 @@ void *_malloc32(__size_t);
 
 static int vms_load(DSO *dso);
 static int vms_unload(DSO *dso);
-static void *vms_bind_var(DSO *dso, const char *symname);
 static DSO_FUNC_TYPE vms_bind_func(DSO *dso, const char *symname);
 static char *vms_name_converter(DSO *dso, const char *filename);
 static char *vms_merger(DSO *dso, const char *filespec1,
@@ -94,13 +45,14 @@ static DSO_METHOD dso_meth_vms = {
     "OpenSSL 'VMS' shared library method",
     vms_load,
     NULL,                       /* unload */
-    vms_bind_var,
     vms_bind_func,
     NULL,                       /* ctrl */
     vms_name_converter,
     vms_merger,
     NULL,                       /* init */
-    NULL                        /* finish */
+    NULL,                       /* finish */
+    NULL,                       /* pathbyaddr */
+    NULL                        /* globallookup */
 };
 
 /*
@@ -151,7 +103,7 @@ static int vms_load(DSO *dso)
 # endif                         /* __INITIAL_POINTER_SIZE == 64 */
 
     const char *sp1, *sp2;      /* Search result */
-    const char *ext = NULL;	/* possible extension to add */
+    const char *ext = NULL;     /* possible extension to add */
 
     if (filename == NULL) {
         DSOerr(DSO_F_VMS_LOAD, DSO_R_NO_FILENAME);
@@ -255,12 +207,12 @@ static int vms_load(DSO *dso)
 
     /* Success (for now, we lie.  We actually do not know...) */
     dso->loaded_filename = filename;
-    return (1);
+    return 1;
  err:
     /* Cleanup! */
     OPENSSL_free(p);
     OPENSSL_free(filename);
-    return (0);
+    return 0;
 }
 
 /*
@@ -273,18 +225,18 @@ static int vms_unload(DSO *dso)
     DSO_VMS_INTERNAL *p;
     if (dso == NULL) {
         DSOerr(DSO_F_VMS_UNLOAD, ERR_R_PASSED_NULL_PARAMETER);
-        return (0);
+        return 0;
     }
     if (sk_void_num(dso->meth_data) < 1)
-        return (1);
+        return 1;
     p = (DSO_VMS_INTERNAL *)sk_void_pop(dso->meth_data);
     if (p == NULL) {
         DSOerr(DSO_F_VMS_UNLOAD, DSO_R_NULL_HANDLE);
-        return (0);
+        return 0;
     }
     /* Cleanup */
     OPENSSL_free(p);
-    return (1);
+    return 1;
 }
 
 /*
@@ -311,16 +263,13 @@ static int do_find_symbol(DSO_VMS_INTERNAL *ptr,
                                      symname_dsc, sym, 0, flags);
 }
 
+# ifndef LIB$M_FIS_MIXEDCASE
+#  define LIB$M_FIS_MIXEDCASE (1 << 4);
+# endif
 void vms_bind_sym(DSO *dso, const char *symname, void **sym)
 {
     DSO_VMS_INTERNAL *ptr;
-    int status;
-# if 0
-    int flags = (1 << 4);       /* LIB$M_FIS_MIXEDCASE, but this symbol isn't
-                                 * defined in VMS older than 7.0 or so */
-# else
-    int flags = 0;
-# endif
+    int status = 0;
     struct dsc$descriptor_s symname_dsc;
 
 /* Arrange 32-bit pointer to (copied) string storage, if needed. */
@@ -363,10 +312,10 @@ void vms_bind_sym(DSO *dso, const char *symname, void **sym)
         return;
     }
 
-    if (dso->flags & DSO_FLAG_UPCASE_SYMBOL)
-        flags = 0;
+    status = do_find_symbol(ptr, &symname_dsc, sym, LIB$M_FIS_MIXEDCASE);
 
-    status = do_find_symbol(ptr, &symname_dsc, sym, flags);
+    if (!$VMS_STATUS_SUCCESS(status))
+        status = do_find_symbol(ptr, &symname_dsc, sym, 0);
 
     if (!$VMS_STATUS_SUCCESS(status)) {
         unsigned short length;
@@ -402,13 +351,6 @@ void vms_bind_sym(DSO *dso, const char *symname, void **sym)
         return;
     }
     return;
-}
-
-static void *vms_bind_var(DSO *dso, const char *symname)
-{
-    void *sym = 0;
-    vms_bind_sym(dso, symname, &sym);
-    return sym;
 }
 
 static DSO_FUNC_TYPE vms_bind_func(DSO *dso, const char *symname)
@@ -499,7 +441,7 @@ static char *vms_merger(DSO *dso, const char *filespec1,
                                "filespec \"", filespec1, "\", ",
                                "defaults \"", filespec2, "\": ", errstring);
         }
-        return (NULL);
+        return NULL;
     }
 
     merged = OPENSSL_malloc(nam.NAMX_ESL + 1);
@@ -507,7 +449,7 @@ static char *vms_merger(DSO *dso, const char *filespec1,
         goto malloc_err;
     strncpy(merged, nam.NAMX_ESA, nam.NAMX_ESL);
     merged[nam.NAMX_ESL] = '\0';
-    return (merged);
+    return merged;
  malloc_err:
     DSOerr(DSO_F_VMS_MERGER, ERR_R_MALLOC_FAILURE);
 }
@@ -518,7 +460,7 @@ static char *vms_name_converter(DSO *dso, const char *filename)
     char *not_translated = OPENSSL_malloc(len + 1);
     if (not_translated != NULL)
         strcpy(not_translated, filename);
-    return (not_translated);
+    return not_translated;
 }
 
 #endif                          /* OPENSSL_SYS_VMS */

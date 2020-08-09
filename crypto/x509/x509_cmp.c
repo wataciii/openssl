@@ -1,80 +1,38 @@
-/* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
- * All rights reserved.
+/*
+ * Copyright 1995-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * This package is an SSL implementation written
- * by Eric Young (eay@cryptsoft.com).
- * The implementation was written so as to conform with Netscapes SSL.
- *
- * This library is free for commercial and non-commercial use as long as
- * the following conditions are aheared to.  The following conditions
- * apply to all code found in this distribution, be it the RC4, RSA,
- * lhash, DES, etc., code; not just the SSL code.  The SSL documentation
- * included with this distribution is covered by the same copyright terms
- * except that the holder is Tim Hudson (tjh@cryptsoft.com).
- *
- * Copyright remains Eric Young's, and as such any Copyright notices in
- * the code are not to be removed.
- * If this package is used in a product, Eric Young should be given attribution
- * as the author of the parts of the library used.
- * This can be in the form of a textual message at program startup or
- * in documentation (online or textual) provided with the package.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. All advertising materials mentioning features or use of this software
- *    must display the following acknowledgement:
- *    "This product includes cryptographic software written by
- *     Eric Young (eay@cryptsoft.com)"
- *    The word 'cryptographic' can be left out if the rouines from the library
- *    being used are not cryptographic related :-).
- * 4. If you include any Windows specific code (or a derivative thereof) from
- *    the apps directory (application code) you must include an acknowledgement:
- *    "This product includes software written by Tim Hudson (tjh@cryptsoft.com)"
- *
- * THIS SOFTWARE IS PROVIDED BY ERIC YOUNG ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- *
- * The licence and distribution terms for any publically available version or
- * derivative of this code cannot be changed.  i.e. this code cannot simply be
- * copied and put under another distribution licence
- * [including the GNU Public Licence.]
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 #include <stdio.h>
-#include <ctype.h>
 #include "internal/cryptlib.h"
 #include <openssl/asn1.h>
 #include <openssl/objects.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
-#include "internal/x509_int.h"
+#include <openssl/core_names.h>
+#include "crypto/x509.h"
+
+DEFINE_STACK_OF(X509)
 
 int X509_issuer_and_serial_cmp(const X509 *a, const X509 *b)
 {
     int i;
     const X509_CINF *ai, *bi;
 
+    if (b == NULL)
+        return a != NULL;
+    if (a == NULL)
+        return -1;
     ai = &a->cert_info;
     bi = &b->cert_info;
     i = ASN1_INTEGER_cmp(&ai->serialNumber, &bi->serialNumber);
     if (i)
-        return (i);
-    return (X509_NAME_cmp(ai->issuer, bi->issuer));
+        return i;
+    return X509_NAME_cmp(ai->issuer, bi->issuer);
 }
 
 #ifndef OPENSSL_NO_MD5
@@ -104,23 +62,23 @@ unsigned long X509_issuer_and_serial_hash(X509 *a)
         ) & 0xffffffffL;
  err:
     EVP_MD_CTX_free(ctx);
-    return (ret);
+    return ret;
 }
 #endif
 
 int X509_issuer_name_cmp(const X509 *a, const X509 *b)
 {
-    return (X509_NAME_cmp(a->cert_info.issuer, b->cert_info.issuer));
+    return X509_NAME_cmp(a->cert_info.issuer, b->cert_info.issuer);
 }
 
 int X509_subject_name_cmp(const X509 *a, const X509 *b)
 {
-    return (X509_NAME_cmp(a->cert_info.subject, b->cert_info.subject));
+    return X509_NAME_cmp(a->cert_info.subject, b->cert_info.subject);
 }
 
 int X509_CRL_cmp(const X509_CRL *a, const X509_CRL *b)
 {
-    return (X509_NAME_cmp(a->crl.issuer, b->crl.issuer));
+    return X509_NAME_cmp(a->crl.issuer, b->crl.issuer);
 }
 
 int X509_CRL_match(const X509_CRL *a, const X509_CRL *b)
@@ -128,26 +86,26 @@ int X509_CRL_match(const X509_CRL *a, const X509_CRL *b)
     return memcmp(a->sha1_hash, b->sha1_hash, 20);
 }
 
-X509_NAME *X509_get_issuer_name(X509 *a)
+X509_NAME *X509_get_issuer_name(const X509 *a)
 {
-    return (a->cert_info.issuer);
+    return a->cert_info.issuer;
 }
 
 unsigned long X509_issuer_name_hash(X509 *x)
 {
-    return (X509_NAME_hash(x->cert_info.issuer));
+    return X509_NAME_hash(x->cert_info.issuer);
 }
 
 #ifndef OPENSSL_NO_MD5
 unsigned long X509_issuer_name_hash_old(X509 *x)
 {
-    return (X509_NAME_hash_old(x->cert_info.issuer));
+    return X509_NAME_hash_old(x->cert_info.issuer);
 }
 #endif
 
-X509_NAME *X509_get_subject_name(X509 *a)
+X509_NAME *X509_get_subject_name(const X509 *a)
 {
-    return (a->cert_info.subject);
+    return a->cert_info.subject;
 }
 
 ASN1_INTEGER *X509_get_serialNumber(X509 *a)
@@ -155,15 +113,20 @@ ASN1_INTEGER *X509_get_serialNumber(X509 *a)
     return &a->cert_info.serialNumber;
 }
 
+const ASN1_INTEGER *X509_get0_serialNumber(const X509 *a)
+{
+    return &a->cert_info.serialNumber;
+}
+
 unsigned long X509_subject_name_hash(X509 *x)
 {
-    return (X509_NAME_hash(x->cert_info.subject));
+    return X509_NAME_hash(x->cert_info.subject);
 }
 
 #ifndef OPENSSL_NO_MD5
 unsigned long X509_subject_name_hash_old(X509 *x)
 {
-    return (X509_NAME_hash_old(x->cert_info.subject));
+    return X509_NAME_hash_old(x->cert_info.subject);
 }
 #endif
 
@@ -178,18 +141,22 @@ unsigned long X509_subject_name_hash_old(X509 *x)
 int X509_cmp(const X509 *a, const X509 *b)
 {
     int rv;
+
     /* ensure hash is valid */
-    X509_check_purpose((X509 *)a, -1, 0);
-    X509_check_purpose((X509 *)b, -1, 0);
+    if (X509_check_purpose((X509 *)a, -1, 0) != 1)
+        return -2;
+    if (X509_check_purpose((X509 *)b, -1, 0) != 1)
+        return -2;
 
     rv = memcmp(a->sha1_hash, b->sha1_hash, SHA_DIGEST_LENGTH);
     if (rv)
         return rv;
     /* Check for match against stored encoding too */
     if (!a->cert_info.enc.modified && !b->cert_info.enc.modified) {
-        rv = (int)(a->cert_info.enc.len - b->cert_info.enc.len);
-        if (rv)
-            return rv;
+        if (a->cert_info.enc.len < b->cert_info.enc.len)
+            return -1;
+        if (a->cert_info.enc.len > b->cert_info.enc.len)
+            return 1;
         return memcmp(a->cert_info.enc.enc, b->cert_info.enc.enc,
                       a->cert_info.enc.len);
     }
@@ -200,8 +167,12 @@ int X509_NAME_cmp(const X509_NAME *a, const X509_NAME *b)
 {
     int ret;
 
-    /* Ensure canonical encoding is present and up to date */
+    if (b == NULL)
+        return a != NULL;
+    if (a == NULL)
+        return -1;
 
+    /* Ensure canonical encoding is present and up to date */
     if (!a->canon_enc || a->modified) {
         ret = i2d_X509_NAME((X509_NAME *)a, NULL);
         if (ret < 0)
@@ -216,14 +187,14 @@ int X509_NAME_cmp(const X509_NAME *a, const X509_NAME *b)
 
     ret = a->canon_enclen - b->canon_enclen;
 
-    if (ret)
+    if (ret != 0 || a->canon_enclen == 0)
         return ret;
 
     return memcmp(a->canon_enc, b->canon_enc, a->canon_enclen);
 
 }
 
-unsigned long X509_NAME_hash(X509_NAME *x)
+unsigned long X509_NAME_hash(const X509_NAME *x)
 {
     unsigned long ret = 0;
     unsigned char md[SHA_DIGEST_LENGTH];
@@ -237,7 +208,7 @@ unsigned long X509_NAME_hash(X509_NAME *x)
     ret = (((unsigned long)md[0]) | ((unsigned long)md[1] << 8L) |
            ((unsigned long)md[2] << 16L) | ((unsigned long)md[3] << 24L)
         ) & 0xffffffffL;
-    return (ret);
+    return ret;
 }
 
 #ifndef OPENSSL_NO_MD5
@@ -246,33 +217,36 @@ unsigned long X509_NAME_hash(X509_NAME *x)
  * this is reasonably efficient.
  */
 
-unsigned long X509_NAME_hash_old(X509_NAME *x)
+unsigned long X509_NAME_hash_old(const X509_NAME *x)
 {
+    EVP_MD *md5 = EVP_MD_fetch(NULL, OSSL_DIGEST_NAME_MD5, "-fips");
     EVP_MD_CTX *md_ctx = EVP_MD_CTX_new();
     unsigned long ret = 0;
     unsigned char md[16];
 
-    if (md_ctx == NULL)
-        return ret;
+    if (md5 == NULL || md_ctx == NULL)
+        goto end;
 
     /* Make sure X509_NAME structure contains valid cached encoding */
     i2d_X509_NAME(x, NULL);
-    EVP_MD_CTX_set_flags(md_ctx, EVP_MD_CTX_FLAG_NON_FIPS_ALLOW);
-    if (EVP_DigestInit_ex(md_ctx, EVP_md5(), NULL)
+    if (EVP_DigestInit_ex(md_ctx, md5, NULL)
         && EVP_DigestUpdate(md_ctx, x->bytes->data, x->bytes->length)
         && EVP_DigestFinal_ex(md_ctx, md, NULL))
         ret = (((unsigned long)md[0]) | ((unsigned long)md[1] << 8L) |
                ((unsigned long)md[2] << 16L) | ((unsigned long)md[3] << 24L)
             ) & 0xffffffffL;
-    EVP_MD_CTX_free(md_ctx);
 
-    return (ret);
+ end:
+    EVP_MD_CTX_free(md_ctx);
+    EVP_MD_free(md5);
+
+    return ret;
 }
 #endif
 
 /* Search a stack of X509 for a match */
-X509 *X509_find_by_issuer_and_serial(STACK_OF(X509) *sk, X509_NAME *name,
-                                     ASN1_INTEGER *serial)
+X509 *X509_find_by_issuer_and_serial(STACK_OF(X509) *sk, const X509_NAME *name,
+                                     const ASN1_INTEGER *serial)
 {
     int i;
     X509 x, *x509 = NULL;
@@ -281,17 +255,17 @@ X509 *X509_find_by_issuer_and_serial(STACK_OF(X509) *sk, X509_NAME *name,
         return NULL;
 
     x.cert_info.serialNumber = *serial;
-    x.cert_info.issuer = name;
+    x.cert_info.issuer = (X509_NAME *)name; /* won't modify it */
 
     for (i = 0; i < sk_X509_num(sk); i++) {
         x509 = sk_X509_value(sk, i);
         if (X509_issuer_and_serial_cmp(x509, &x) == 0)
-            return (x509);
+            return x509;
     }
-    return (NULL);
+    return NULL;
 }
 
-X509 *X509_find_by_subject(STACK_OF(X509) *sk, X509_NAME *name)
+X509 *X509_find_by_subject(STACK_OF(X509) *sk, const X509_NAME *name)
 {
     X509 *x509;
     int i;
@@ -299,12 +273,12 @@ X509 *X509_find_by_subject(STACK_OF(X509) *sk, X509_NAME *name)
     for (i = 0; i < sk_X509_num(sk); i++) {
         x509 = sk_X509_value(sk, i);
         if (X509_NAME_cmp(X509_get_subject_name(x509), name) == 0)
-            return (x509);
+            return x509;
     }
-    return (NULL);
+    return NULL;
 }
 
-EVP_PKEY *X509_get0_pubkey(X509 *x)
+EVP_PKEY *X509_get0_pubkey(const X509 *x)
 {
     if (x == NULL)
         return NULL;
@@ -318,15 +292,15 @@ EVP_PKEY *X509_get_pubkey(X509 *x)
     return X509_PUBKEY_get(x->cert_info.key);
 }
 
-int X509_check_private_key(X509 *x, EVP_PKEY *k)
+int X509_check_private_key(const X509 *x, const EVP_PKEY *k)
 {
-    EVP_PKEY *xk;
+    const EVP_PKEY *xk;
     int ret;
 
     xk = X509_get0_pubkey(x);
 
     if (xk)
-        ret = EVP_PKEY_cmp(xk, k);
+        ret = EVP_PKEY_eq(xk, k);
     else
         ret = -2;
 
@@ -493,9 +467,17 @@ STACK_OF(X509) *X509_chain_up_ref(STACK_OF(X509) *chain)
     STACK_OF(X509) *ret;
     int i;
     ret = sk_X509_dup(chain);
+    if (ret == NULL)
+        return NULL;
     for (i = 0; i < sk_X509_num(ret); i++) {
         X509 *x = sk_X509_value(ret, i);
-        X509_up_ref(x);
+        if (!X509_up_ref(x))
+            goto err;
     }
     return ret;
+ err:
+    while (i-- > 0)
+        X509_free (sk_X509_value(ret, i));
+    sk_X509_free(ret);
+    return NULL;
 }

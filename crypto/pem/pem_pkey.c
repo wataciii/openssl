@@ -1,58 +1,10 @@
-/* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
- * All rights reserved.
+/*
+ * Copyright 1995-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * This package is an SSL implementation written
- * by Eric Young (eay@cryptsoft.com).
- * The implementation was written so as to conform with Netscapes SSL.
- *
- * This library is free for commercial and non-commercial use as long as
- * the following conditions are aheared to.  The following conditions
- * apply to all code found in this distribution, be it the RC4, RSA,
- * lhash, DES, etc., code; not just the SSL code.  The SSL documentation
- * included with this distribution is covered by the same copyright terms
- * except that the holder is Tim Hudson (tjh@cryptsoft.com).
- *
- * Copyright remains Eric Young's, and as such any Copyright notices in
- * the code are not to be removed.
- * If this package is used in a product, Eric Young should be given attribution
- * as the author of the parts of the library used.
- * This can be in the form of a textual message at program startup or
- * in documentation (online or textual) provided with the package.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. All advertising materials mentioning features or use of this software
- *    must display the following acknowledgement:
- *    "This product includes cryptographic software written by
- *     Eric Young (eay@cryptsoft.com)"
- *    The word 'cryptographic' can be left out if the rouines from the library
- *    being used are not cryptographic related :-).
- * 4. If you include any Windows specific code (or a derivative thereof) from
- *    the apps directory (application code) you must include an acknowledgement:
- *    "This product includes software written by Tim Hudson (tjh@cryptsoft.com)"
- *
- * THIS SOFTWARE IS PROVIDED BY ERIC YOUNG ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- *
- * The licence and distribution terms for any publically available version or
- * derivative of this code cannot be changed.  i.e. this code cannot simply be
- * copied and put under another distribution licence
- * [including the GNU Public Licence.]
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 #include <stdio.h>
@@ -60,94 +12,90 @@
 #include <openssl/buffer.h>
 #include <openssl/objects.h>
 #include <openssl/evp.h>
-#include <openssl/rand.h>
 #include <openssl/x509.h>
 #include <openssl/pkcs12.h>
 #include <openssl/pem.h>
 #include <openssl/engine.h>
 #include <openssl/dh.h>
-#include "internal/asn1_int.h"
-#include "internal/evp_int.h"
+#include <openssl/store.h>
+#include <openssl/ui.h>
+#include <openssl/serializer.h>
+#include "crypto/store.h"
+#include "crypto/asn1.h"
+#include "crypto/evp.h"
+#include "pem_local.h"
 
 int pem_check_suffix(const char *pem_str, const char *suffix);
+
+EVP_PKEY *PEM_read_bio_PrivateKey_ex(BIO *bp, EVP_PKEY **x, pem_password_cb *cb,
+                                     void *u, OPENSSL_CTX *libctx,
+                                     const char *propq)
+{
+    EVP_PKEY *ret = NULL;
+    OSSL_STORE_CTX *ctx = NULL;
+    OSSL_STORE_INFO *info = NULL;
+    UI_METHOD *ui_method = NULL;
+
+    if ((ui_method = UI_UTIL_wrap_read_pem_callback(cb, 0)) == NULL)
+        return NULL;
+
+    if ((ctx = OSSL_STORE_attach(bp, "file", libctx, propq, ui_method, u,
+                                 NULL, NULL)) == NULL)
+        goto err;
+#ifndef OPENSSL_NO_SECURE_HEAP
+    {
+        int on = 1;
+        if (!OSSL_STORE_ctrl(ctx, OSSL_STORE_C_USE_SECMEM, &on))
+            goto err;
+    }
+#endif
+
+    while (!OSSL_STORE_eof(ctx)
+           && (info = OSSL_STORE_load(ctx)) != NULL) {
+        if (OSSL_STORE_INFO_get_type(info) == OSSL_STORE_INFO_PKEY) {
+            ret = OSSL_STORE_INFO_get1_PKEY(info);
+            break;
+        }
+        OSSL_STORE_INFO_free(info);
+        info = NULL;
+    }
+
+    if (ret != NULL && x != NULL)
+        *x = ret;
+
+ err:
+    OSSL_STORE_close(ctx);
+    UI_destroy_method(ui_method);
+    OSSL_STORE_INFO_free(info);
+    return ret;
+}
 
 EVP_PKEY *PEM_read_bio_PrivateKey(BIO *bp, EVP_PKEY **x, pem_password_cb *cb,
                                   void *u)
 {
-    char *nm = NULL;
-    const unsigned char *p = NULL;
-    unsigned char *data = NULL;
-    long len;
-    int slen;
-    EVP_PKEY *ret = NULL;
-
-    if (!PEM_bytes_read_bio(&data, &len, &nm, PEM_STRING_EVP_PKEY, bp, cb, u))
-        return NULL;
-    p = data;
-
-    if (strcmp(nm, PEM_STRING_PKCS8INF) == 0) {
-        PKCS8_PRIV_KEY_INFO *p8inf;
-        p8inf = d2i_PKCS8_PRIV_KEY_INFO(NULL, &p, len);
-        if (!p8inf)
-            goto p8err;
-        ret = EVP_PKCS82PKEY(p8inf);
-        if (x) {
-            EVP_PKEY_free((EVP_PKEY *)*x);
-            *x = ret;
-        }
-        PKCS8_PRIV_KEY_INFO_free(p8inf);
-    } else if (strcmp(nm, PEM_STRING_PKCS8) == 0) {
-        PKCS8_PRIV_KEY_INFO *p8inf;
-        X509_SIG *p8;
-        int klen;
-        char psbuf[PEM_BUFSIZE];
-        p8 = d2i_X509_SIG(NULL, &p, len);
-        if (!p8)
-            goto p8err;
-        if (cb)
-            klen = cb(psbuf, PEM_BUFSIZE, 0, u);
-        else
-            klen = PEM_def_callback(psbuf, PEM_BUFSIZE, 0, u);
-        if (klen <= 0) {
-            PEMerr(PEM_F_PEM_READ_BIO_PRIVATEKEY, PEM_R_BAD_PASSWORD_READ);
-            X509_SIG_free(p8);
-            goto err;
-        }
-        p8inf = PKCS8_decrypt(p8, psbuf, klen);
-        X509_SIG_free(p8);
-        if (!p8inf)
-            goto p8err;
-        ret = EVP_PKCS82PKEY(p8inf);
-        if (x) {
-            EVP_PKEY_free((EVP_PKEY *)*x);
-            *x = ret;
-        }
-        PKCS8_PRIV_KEY_INFO_free(p8inf);
-    } else if ((slen = pem_check_suffix(nm, "PRIVATE KEY")) > 0) {
-        const EVP_PKEY_ASN1_METHOD *ameth;
-        ameth = EVP_PKEY_asn1_find_str(NULL, nm, slen);
-        if (!ameth || !ameth->old_priv_decode)
-            goto p8err;
-        ret = d2i_PrivateKey(ameth->pkey_id, x, &p, len);
-    }
- p8err:
-    if (ret == NULL)
-        PEMerr(PEM_F_PEM_READ_BIO_PRIVATEKEY, ERR_R_ASN1_LIB);
- err:
-    OPENSSL_free(nm);
-    OPENSSL_clear_free(data, len);
-    return (ret);
+    return PEM_read_bio_PrivateKey_ex(bp, x, cb, u, NULL, NULL);
 }
 
-int PEM_write_bio_PrivateKey(BIO *bp, EVP_PKEY *x, const EVP_CIPHER *enc,
-                             unsigned char *kstr, int klen,
-                             pem_password_cb *cb, void *u)
+PEM_write_cb_fnsig(PrivateKey, EVP_PKEY, BIO, write_bio)
+{
+    IMPLEMENT_PEM_provided_write_body_vars(EVP_PKEY, PrivateKey);
+
+    IMPLEMENT_PEM_provided_write_body_pass();
+    IMPLEMENT_PEM_provided_write_body_main(EVP_PKEY, bio);
+
+ legacy:
+    if (x->ameth == NULL || x->ameth->priv_encode != NULL)
+        return PEM_write_bio_PKCS8PrivateKey(out, x, enc,
+                                             (const char *)kstr, klen, cb, u);
+    return PEM_write_bio_PrivateKey_traditional(out, x, enc, kstr, klen, cb, u);
+}
+
+int PEM_write_bio_PrivateKey_traditional(BIO *bp, const EVP_PKEY *x,
+                                         const EVP_CIPHER *enc,
+                                         const unsigned char *kstr, int klen,
+                                         pem_password_cb *cb, void *u)
 {
     char pem_str[80];
-    if (!x->ameth || x->ameth->priv_encode)
-        return PEM_write_bio_PKCS8PrivateKey(bp, x, enc,
-                                             (char *)kstr, klen, cb, u);
-
     BIO_snprintf(pem_str, 80, "%s PRIVATE KEY", x->ameth->pem_str);
     return PEM_ASN1_write_bio((i2d_of_void *)i2d_PrivateKey,
                               pem_str, bp, x, enc, kstr, klen, cb, u);
@@ -155,72 +103,74 @@ int PEM_write_bio_PrivateKey(BIO *bp, EVP_PKEY *x, const EVP_CIPHER *enc,
 
 EVP_PKEY *PEM_read_bio_Parameters(BIO *bp, EVP_PKEY **x)
 {
-    char *nm = NULL;
-    const unsigned char *p = NULL;
-    unsigned char *data = NULL;
-    long len;
-    int slen;
     EVP_PKEY *ret = NULL;
+    OSSL_STORE_CTX *ctx = NULL;
+    OSSL_STORE_INFO *info = NULL;
 
-    if (!PEM_bytes_read_bio(&data, &len, &nm, PEM_STRING_PARAMETERS,
-                            bp, 0, NULL))
-        return NULL;
-    p = data;
+    if ((ctx = OSSL_STORE_attach(bp, "file", NULL, NULL, UI_null(), NULL,
+                                 NULL, NULL)) == NULL)
+        goto err;
 
-    if ((slen = pem_check_suffix(nm, "PARAMETERS")) > 0) {
-        ret = EVP_PKEY_new();
-        if (ret == NULL)
-            goto err;
-        if (!EVP_PKEY_set_type_str(ret, nm, slen)
-            || !ret->ameth->param_decode
-            || !ret->ameth->param_decode(ret, &p, len)) {
-            EVP_PKEY_free(ret);
-            ret = NULL;
-            goto err;
+    while (!OSSL_STORE_eof(ctx) && (info = OSSL_STORE_load(ctx)) != NULL) {
+        if (OSSL_STORE_INFO_get_type(info) == OSSL_STORE_INFO_PARAMS) {
+            ret = OSSL_STORE_INFO_get1_PARAMS(info);
+            break;
         }
-        if (x) {
-            EVP_PKEY_free((EVP_PKEY *)*x);
-            *x = ret;
-        }
+        OSSL_STORE_INFO_free(info);
+        info = NULL;
     }
+
+    if (ret != NULL && x != NULL)
+        *x = ret;
+
  err:
-    if (ret == NULL)
-        PEMerr(PEM_F_PEM_READ_BIO_PARAMETERS, ERR_R_ASN1_LIB);
-    OPENSSL_free(nm);
-    OPENSSL_free(data);
-    return (ret);
+    OSSL_STORE_close(ctx);
+    OSSL_STORE_INFO_free(info);
+    return ret;
 }
 
-int PEM_write_bio_Parameters(BIO *bp, EVP_PKEY *x)
+PEM_write_fnsig(Parameters, EVP_PKEY, BIO, write_bio)
 {
     char pem_str[80];
+    IMPLEMENT_PEM_provided_write_body_vars(EVP_PKEY, Parameters);
+
+    IMPLEMENT_PEM_provided_write_body_main(EVP_PKEY, bio);
+
+ legacy:
     if (!x->ameth || !x->ameth->param_encode)
         return 0;
 
     BIO_snprintf(pem_str, 80, "%s PARAMETERS", x->ameth->pem_str);
     return PEM_ASN1_write_bio((i2d_of_void *)x->ameth->param_encode,
-                              pem_str, bp, x, NULL, NULL, 0, 0, NULL);
+                              pem_str, out, x, NULL, NULL, 0, 0, NULL);
 }
 
 #ifndef OPENSSL_NO_STDIO
-EVP_PKEY *PEM_read_PrivateKey(FILE *fp, EVP_PKEY **x, pem_password_cb *cb,
-                              void *u)
+EVP_PKEY *PEM_read_PrivateKey_ex(FILE *fp, EVP_PKEY **x, pem_password_cb *cb,
+                                 void *u, OPENSSL_CTX *libctx,
+                                 const char *propq)
 {
     BIO *b;
     EVP_PKEY *ret;
 
     if ((b = BIO_new(BIO_s_file())) == NULL) {
-        PEMerr(PEM_F_PEM_READ_PRIVATEKEY, ERR_R_BUF_LIB);
-        return (0);
+        PEMerr(0, ERR_R_BUF_LIB);
+        return 0;
     }
     BIO_set_fp(b, fp, BIO_NOCLOSE);
-    ret = PEM_read_bio_PrivateKey(b, x, cb, u);
+    ret = PEM_read_bio_PrivateKey_ex(b, x, cb, u, libctx, propq);
     BIO_free(b);
-    return (ret);
+    return ret;
 }
 
-int PEM_write_PrivateKey(FILE *fp, EVP_PKEY *x, const EVP_CIPHER *enc,
-                         unsigned char *kstr, int klen,
+EVP_PKEY *PEM_read_PrivateKey(FILE *fp, EVP_PKEY **x, pem_password_cb *cb,
+                              void *u)
+{
+    return PEM_read_PrivateKey_ex(fp, x, cb, u, NULL, NULL);
+}
+
+int PEM_write_PrivateKey(FILE *fp, const EVP_PKEY *x, const EVP_CIPHER *enc,
+                         const unsigned char *kstr, int klen,
                          pem_password_cb *cb, void *u)
 {
     BIO *b;
@@ -243,25 +193,39 @@ int PEM_write_PrivateKey(FILE *fp, EVP_PKEY *x, const EVP_CIPHER *enc,
 
 DH *PEM_read_bio_DHparams(BIO *bp, DH **x, pem_password_cb *cb, void *u)
 {
-    char *nm = NULL;
-    const unsigned char *p = NULL;
-    unsigned char *data = NULL;
-    long len;
     DH *ret = NULL;
+    EVP_PKEY *pkey = NULL;
+    OSSL_STORE_CTX *ctx = NULL;
+    OSSL_STORE_INFO *info = NULL;
+    UI_METHOD *ui_method = NULL;
 
-    if (!PEM_bytes_read_bio(&data, &len, &nm, PEM_STRING_DHPARAMS, bp, cb, u))
+    if ((ui_method = UI_UTIL_wrap_read_pem_callback(cb, 0)) == NULL)
         return NULL;
-    p = data;
 
-    if (strcmp(nm, PEM_STRING_DHXPARAMS) == 0)
-        ret = d2i_DHxparams(x, &p, len);
-    else
-        ret = d2i_DHparams(x, &p, len);
+    if ((ctx = OSSL_STORE_attach(bp, "file", NULL, NULL, ui_method, u,
+                                 NULL, NULL)) == NULL)
+        goto err;
 
-    if (ret == NULL)
-        PEMerr(PEM_F_PEM_READ_BIO_DHPARAMS, ERR_R_ASN1_LIB);
-    OPENSSL_free(nm);
-    OPENSSL_free(data);
+    while (!OSSL_STORE_eof(ctx) && (info = OSSL_STORE_load(ctx)) != NULL) {
+        if (OSSL_STORE_INFO_get_type(info) == OSSL_STORE_INFO_PARAMS) {
+            pkey = OSSL_STORE_INFO_get0_PARAMS(info);
+            if (EVP_PKEY_id(pkey) == EVP_PKEY_DHX
+                || EVP_PKEY_id(pkey) == EVP_PKEY_DH) {
+                ret = EVP_PKEY_get1_DH(pkey);
+                break;
+            }
+        }
+        OSSL_STORE_INFO_free(info);
+        info = NULL;
+    }
+
+    if (ret != NULL && x != NULL)
+        *x = ret;
+
+ err:
+    OSSL_STORE_close(ctx);
+    UI_destroy_method(ui_method);
+    OSSL_STORE_INFO_free(info);
     return ret;
 }
 
@@ -273,12 +237,12 @@ DH *PEM_read_DHparams(FILE *fp, DH **x, pem_password_cb *cb, void *u)
 
     if ((b = BIO_new(BIO_s_file())) == NULL) {
         PEMerr(PEM_F_PEM_READ_DHPARAMS, ERR_R_BUF_LIB);
-        return (0);
+        return 0;
     }
     BIO_set_fp(b, fp, BIO_NOCLOSE);
     ret = PEM_read_bio_DHparams(b, x, cb, u);
     BIO_free(b);
-    return (ret);
+    return ret;
 }
 # endif
 

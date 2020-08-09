@@ -1,4 +1,11 @@
-#!/usr/bin/env perl
+#! /usr/bin/env perl
+# Copyright 2015-2020 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+
 
 # ====================================================================
 # Written by Andy Polyakov <appro@openssl.org> for the OpenSSL
@@ -24,8 +31,7 @@
 # on benchmark. Lower coefficients are for ECDSA sign, server-side
 # operation. Keep in mind that +200% means 3x improvement.
 
-$output = pop;
-open STDOUT,">$output";
+$output = pop and open STDOUT,">$output";
 
 $code.=<<___;
 #include "sparc_arch.h"
@@ -94,6 +100,7 @@ my ($bi,$a0,$mask,$carry)=(map("%i$_",(3..5)),"%g1");
 my ($rp_real,$ap_real)=("%g2","%g3");
 
 $code.=<<___;
+.type	ecp_nistz256_precomputed,#object
 .size	ecp_nistz256_precomputed,.-ecp_nistz256_precomputed
 .align	64
 .LRR:	! 2^512 mod P precomputed for NIST P256 polynomial
@@ -115,6 +122,7 @@ ecp_nistz256_to_mont:
 	nop
 	ret
 	restore
+.type	ecp_nistz256_to_mont,#function
 .size	ecp_nistz256_to_mont,.-ecp_nistz256_to_mont
 
 ! void	ecp_nistz256_from_mont(BN_ULONG %i0[8],const BN_ULONG %i1[8]);
@@ -129,6 +137,7 @@ ecp_nistz256_from_mont:
 	nop
 	ret
 	restore
+.type	ecp_nistz256_from_mont,#function
 .size	ecp_nistz256_from_mont,.-ecp_nistz256_from_mont
 
 ! void	ecp_nistz256_mul_mont(BN_ULONG %i0[8],const BN_ULONG %i1[8],
@@ -142,6 +151,7 @@ ecp_nistz256_mul_mont:
 	nop
 	ret
 	restore
+.type	ecp_nistz256_mul_mont,#function
 .size	ecp_nistz256_mul_mont,.-ecp_nistz256_mul_mont
 
 ! void	ecp_nistz256_sqr_mont(BN_ULONG %i0[8],const BN_ULONG %i2[8]);
@@ -154,6 +164,7 @@ ecp_nistz256_sqr_mont:
 	nop
 	ret
 	restore
+.type	ecp_nistz256_sqr_mont,#function
 .size	ecp_nistz256_sqr_mont,.-ecp_nistz256_sqr_mont
 ___
 
@@ -353,6 +364,7 @@ $code.=<<___;
 	st	@acc[6],[$rp+24]
 	retl
 	st	@acc[7],[$rp+28]
+.type	__ecp_nistz256_mul_mont,#function
 .size	__ecp_nistz256_mul_mont,.-__ecp_nistz256_mul_mont
 
 ! void	ecp_nistz256_add(BN_ULONG %i0[8],const BN_ULONG %i1[8],
@@ -372,6 +384,7 @@ ecp_nistz256_add:
 	ld	[$ap+28],@acc[7]
 	ret
 	restore
+.type	ecp_nistz256_add,#function
 .size	ecp_nistz256_add,.-ecp_nistz256_add
 
 .align	32
@@ -392,36 +405,48 @@ __ecp_nistz256_add:
 	addccc	@acc[5],$t5,@acc[5]
 	addccc	@acc[6],$t6,@acc[6]
 	addccc	@acc[7],$t7,@acc[7]
-	subc	%g0,%g0,$carry		! broadcast carry bit
+	addc	%g0,%g0,$carry
 
 .Lreduce_by_sub:
 
-	! if a+b carries, subtract modulus.
+	! if a+b >= modulus, subtract modulus.
 	!
+	! But since comparison implies subtraction, we subtract
+	! modulus and then add it back if subtraction borrowed.
+
+	subcc	@acc[0],-1,@acc[0]
+	subccc	@acc[1],-1,@acc[1]
+	subccc	@acc[2],-1,@acc[2]
+	subccc	@acc[3], 0,@acc[3]
+	subccc	@acc[4], 0,@acc[4]
+	subccc	@acc[5], 0,@acc[5]
+	subccc	@acc[6], 1,@acc[6]
+	subccc	@acc[7],-1,@acc[7]
+	subc	$carry,0,$carry
+
 	! Note that because mod has special form, i.e. consists of
 	! 0xffffffff, 1 and 0s, we can conditionally synthesize it by
-	! using value of broadcasted borrow and the borrow bit itself.
-	! To minimize dependency chain we first broadcast and then
-	! extract the bit by negating (follow $bi).
+	! using value of borrow and its negative.
 
-	subcc	@acc[0],$carry,@acc[0]	! subtract synthesized modulus
-	subccc	@acc[1],$carry,@acc[1]
+	addcc	@acc[0],$carry,@acc[0]	! add synthesized modulus
+	addccc	@acc[1],$carry,@acc[1]
 	neg	$carry,$bi
 	st	@acc[0],[$rp]
-	subccc	@acc[2],$carry,@acc[2]
+	addccc	@acc[2],$carry,@acc[2]
 	st	@acc[1],[$rp+4]
-	subccc	@acc[3],0,@acc[3]
+	addccc	@acc[3],0,@acc[3]
 	st	@acc[2],[$rp+8]
-	subccc	@acc[4],0,@acc[4]
+	addccc	@acc[4],0,@acc[4]
 	st	@acc[3],[$rp+12]
-	subccc	@acc[5],0,@acc[5]
+	addccc	@acc[5],0,@acc[5]
 	st	@acc[4],[$rp+16]
-	subccc	@acc[6],$bi,@acc[6]
+	addccc	@acc[6],$bi,@acc[6]
 	st	@acc[5],[$rp+20]
-	subc	@acc[7],$carry,@acc[7]
+	addc	@acc[7],$carry,@acc[7]
 	st	@acc[6],[$rp+24]
 	retl
 	st	@acc[7],[$rp+28]
+.type	__ecp_nistz256_add,#function
 .size	__ecp_nistz256_add,.-__ecp_nistz256_add
 
 ! void	ecp_nistz256_mul_by_2(BN_ULONG %i0[8],const BN_ULONG %i1[8]);
@@ -440,6 +465,7 @@ ecp_nistz256_mul_by_2:
 	ld	[$ap+28],@acc[7]
 	ret
 	restore
+.type	ecp_nistz256_mul_by_2,#function
 .size	ecp_nistz256_mul_by_2,.-ecp_nistz256_mul_by_2
 
 .align	32
@@ -453,7 +479,8 @@ __ecp_nistz256_mul_by_2:
 	addccc	@acc[6],@acc[6],@acc[6]
 	addccc	@acc[7],@acc[7],@acc[7]
 	b	.Lreduce_by_sub
-	subc	%g0,%g0,$carry		! broadcast carry bit
+	addc	%g0,%g0,$carry
+.type	__ecp_nistz256_mul_by_2,#function
 .size	__ecp_nistz256_mul_by_2,.-__ecp_nistz256_mul_by_2
 
 ! void	ecp_nistz256_mul_by_3(BN_ULONG %i0[8],const BN_ULONG %i1[8]);
@@ -472,6 +499,7 @@ ecp_nistz256_mul_by_3:
 	ld	[$ap+28],@acc[7]
 	ret
 	restore
+.type	ecp_nistz256_mul_by_3,#function
 .size	ecp_nistz256_mul_by_3,.-ecp_nistz256_mul_by_3
 
 .align	32
@@ -484,17 +512,27 @@ __ecp_nistz256_mul_by_3:
 	addccc	@acc[5],@acc[5],$t5
 	addccc	@acc[6],@acc[6],$t6
 	addccc	@acc[7],@acc[7],$t7
-	subc	%g0,%g0,$carry		! broadcast carry bit
+	addc	%g0,%g0,$carry
 
-	subcc	$t0,$carry,$t0		! .Lreduce_by_sub but without stores
+	subcc	$t0,-1,$t0		! .Lreduce_by_sub but without stores
+	subccc	$t1,-1,$t1
+	subccc	$t2,-1,$t2
+	subccc	$t3, 0,$t3
+	subccc	$t4, 0,$t4
+	subccc	$t5, 0,$t5
+	subccc	$t6, 1,$t6
+	subccc	$t7,-1,$t7
+	subc	$carry,0,$carry
+
+	addcc	$t0,$carry,$t0		! add synthesized modulus
+	addccc	$t1,$carry,$t1
 	neg	$carry,$bi
-	subccc	$t1,$carry,$t1
-	subccc	$t2,$carry,$t2
-	subccc	$t3,0,$t3
-	subccc	$t4,0,$t4
-	subccc	$t5,0,$t5
-	subccc	$t6,$bi,$t6
-	subc	$t7,$carry,$t7
+	addccc	$t2,$carry,$t2
+	addccc	$t3,0,$t3
+	addccc	$t4,0,$t4
+	addccc	$t5,0,$t5
+	addccc	$t6,$bi,$t6
+	addc	$t7,$carry,$t7
 
 	addcc	$t0,@acc[0],@acc[0]	! 2*a+a=3*a
 	addccc	$t1,@acc[1],@acc[1]
@@ -505,7 +543,8 @@ __ecp_nistz256_mul_by_3:
 	addccc	$t6,@acc[6],@acc[6]
 	addccc	$t7,@acc[7],@acc[7]
 	b	.Lreduce_by_sub
-	subc	%g0,%g0,$carry		! broadcast carry bit
+	addc	%g0,%g0,$carry
+.type	__ecp_nistz256_mul_by_3,#function
 .size	__ecp_nistz256_mul_by_3,.-__ecp_nistz256_mul_by_3
 
 ! void	ecp_nistz256_sub(BN_ULONG %i0[8],const BN_ULONG %i1[8],
@@ -525,6 +564,7 @@ ecp_nistz256_sub:
 	ld	[$ap+28],@acc[7]
 	ret
 	restore
+.type	ecp_nistz256_sub,#function
 .size	ecp_nistz256_sub,.-ecp_nistz256_sub
 
 ! void	ecp_nistz256_neg(BN_ULONG %i0[8],const BN_ULONG %i1[8]);
@@ -544,6 +584,7 @@ ecp_nistz256_neg:
 	mov	0,@acc[7]
 	ret
 	restore
+.type	ecp_nistz256_neg,#function
 .size	ecp_nistz256_neg,.-ecp_nistz256_neg
 
 .align	32
@@ -594,6 +635,7 @@ __ecp_nistz256_sub_from:
 	st	@acc[6],[$rp+24]
 	retl
 	st	@acc[7],[$rp+28]
+.type	__ecp_nistz256_sub_from,#function
 .size	__ecp_nistz256_sub_from,.-__ecp_nistz256_sub_from
 
 .align	32
@@ -616,6 +658,7 @@ __ecp_nistz256_sub_morf:
 	subccc	$t7,@acc[7],@acc[7]
 	b	.Lreduce_by_add
 	subc	%g0,%g0,$carry		! broadcast borrow bit
+.type	__ecp_nistz256_sub_morf,#function
 .size	__ecp_nistz256_sub_morf,.-__ecp_nistz256_sub_morf
 
 ! void	ecp_nistz256_div_by_2(BN_ULONG %i0[8],const BN_ULONG %i1[8]);
@@ -634,6 +677,7 @@ ecp_nistz256_div_by_2:
 	ld	[$ap+28],@acc[7]
 	ret
 	restore
+.type	ecp_nistz256_div_by_2,#function
 .size	ecp_nistz256_div_by_2,.-ecp_nistz256_div_by_2
 
 .align	32
@@ -687,11 +731,12 @@ __ecp_nistz256_div_by_2:
 	st	@acc[6],[$rp+24]
 	retl
 	st	@acc[7],[$rp+28]
+.type	__ecp_nistz256_div_by_2,#function
 .size	__ecp_nistz256_div_by_2,.-__ecp_nistz256_div_by_2
 ___
 
 ########################################################################
-# following subroutines are "literal" implemetation of those found in
+# following subroutines are "literal" implementation of those found in
 # ecp_nistz256.c
 #
 ########################################################################
@@ -816,6 +861,7 @@ ecp_nistz256_point_double:
 
 	ret
 	restore
+.type	ecp_nistz256_point_double,#function
 .size	ecp_nistz256_point_double,.-ecp_nistz256_point_double
 ___
 }
@@ -852,71 +898,39 @@ ecp_nistz256_point_add:
 	mov	$ap,$ap_real
 	mov	$bp,$bp_real
 
-	ld	[$bp],@acc[0]		! in2_x
-	ld	[$bp+4],@acc[1]
-	ld	[$bp+8],@acc[2]
-	ld	[$bp+12],@acc[3]
-	ld	[$bp+16],@acc[4]
-	ld	[$bp+20],@acc[5]
-	ld	[$bp+24],@acc[6]
-	ld	[$bp+28],@acc[7]
-	ld	[$bp+32],$t0		! in2_y
-	ld	[$bp+32+4],$t1
-	ld	[$bp+32+8],$t2
-	ld	[$bp+32+12],$t3
-	ld	[$bp+32+16],$t4
-	ld	[$bp+32+20],$t5
-	ld	[$bp+32+24],$t6
-	ld	[$bp+32+28],$t7
-	or	@acc[1],@acc[0],@acc[0]
-	or	@acc[3],@acc[2],@acc[2]
-	or	@acc[5],@acc[4],@acc[4]
-	or	@acc[7],@acc[6],@acc[6]
-	or	@acc[2],@acc[0],@acc[0]
-	or	@acc[6],@acc[4],@acc[4]
-	or	@acc[4],@acc[0],@acc[0]
+	ld	[$bp+64],$t0		! in2_z
+	ld	[$bp+64+4],$t1
+	ld	[$bp+64+8],$t2
+	ld	[$bp+64+12],$t3
+	ld	[$bp+64+16],$t4
+	ld	[$bp+64+20],$t5
+	ld	[$bp+64+24],$t6
+	ld	[$bp+64+28],$t7
 	or	$t1,$t0,$t0
 	or	$t3,$t2,$t2
 	or	$t5,$t4,$t4
 	or	$t7,$t6,$t6
 	or	$t2,$t0,$t0
 	or	$t6,$t4,$t4
-	or	$t4,$t0,$t0
-	or	@acc[0],$t0,$t0		! !in2infty
+	or	$t4,$t0,$t0		! !in2infty
 	movrnz	$t0,-1,$t0
 	st	$t0,[%fp+STACK_BIAS-12]
 
-	ld	[$ap],@acc[0]		! in1_x
-	ld	[$ap+4],@acc[1]
-	ld	[$ap+8],@acc[2]
-	ld	[$ap+12],@acc[3]
-	ld	[$ap+16],@acc[4]
-	ld	[$ap+20],@acc[5]
-	ld	[$ap+24],@acc[6]
-	ld	[$ap+28],@acc[7]
-	ld	[$ap+32],$t0		! in1_y
-	ld	[$ap+32+4],$t1
-	ld	[$ap+32+8],$t2
-	ld	[$ap+32+12],$t3
-	ld	[$ap+32+16],$t4
-	ld	[$ap+32+20],$t5
-	ld	[$ap+32+24],$t6
-	ld	[$ap+32+28],$t7
-	or	@acc[1],@acc[0],@acc[0]
-	or	@acc[3],@acc[2],@acc[2]
-	or	@acc[5],@acc[4],@acc[4]
-	or	@acc[7],@acc[6],@acc[6]
-	or	@acc[2],@acc[0],@acc[0]
-	or	@acc[6],@acc[4],@acc[4]
-	or	@acc[4],@acc[0],@acc[0]
+	ld	[$ap+64],$t0		! in1_z
+	ld	[$ap+64+4],$t1
+	ld	[$ap+64+8],$t2
+	ld	[$ap+64+12],$t3
+	ld	[$ap+64+16],$t4
+	ld	[$ap+64+20],$t5
+	ld	[$ap+64+24],$t6
+	ld	[$ap+64+28],$t7
 	or	$t1,$t0,$t0
 	or	$t3,$t2,$t2
 	or	$t5,$t4,$t4
 	or	$t7,$t6,$t6
 	or	$t2,$t0,$t0
 	or	$t6,$t4,$t4
-	or	$t4,$t0,$t0
-	or	@acc[0],$t0,$t0		! !in1infty
+	or	$t4,$t0,$t0		! !in1infty
 	movrnz	$t0,-1,$t0
 	st	$t0,[%fp+STACK_BIAS-16]
 
@@ -1118,6 +1132,7 @@ $code.=<<___;
 .Ladd_done:
 	ret
 	restore
+.type	ecp_nistz256_point_add,#function
 .size	ecp_nistz256_point_add,.-ecp_nistz256_point_add
 ___
 }
@@ -1153,37 +1168,21 @@ ecp_nistz256_point_add_affine:
 	mov	$ap,$ap_real
 	mov	$bp,$bp_real
 
-	ld	[$ap],@acc[0]		! in1_x
-	ld	[$ap+4],@acc[1]
-	ld	[$ap+8],@acc[2]
-	ld	[$ap+12],@acc[3]
-	ld	[$ap+16],@acc[4]
-	ld	[$ap+20],@acc[5]
-	ld	[$ap+24],@acc[6]
-	ld	[$ap+28],@acc[7]
-	ld	[$ap+32],$t0		! in1_y
-	ld	[$ap+32+4],$t1
-	ld	[$ap+32+8],$t2
-	ld	[$ap+32+12],$t3
-	ld	[$ap+32+16],$t4
-	ld	[$ap+32+20],$t5
-	ld	[$ap+32+24],$t6
-	ld	[$ap+32+28],$t7
-	or	@acc[1],@acc[0],@acc[0]
-	or	@acc[3],@acc[2],@acc[2]
-	or	@acc[5],@acc[4],@acc[4]
-	or	@acc[7],@acc[6],@acc[6]
-	or	@acc[2],@acc[0],@acc[0]
-	or	@acc[6],@acc[4],@acc[4]
-	or	@acc[4],@acc[0],@acc[0]
+	ld	[$ap+64],$t0		! in1_z
+	ld	[$ap+64+4],$t1
+	ld	[$ap+64+8],$t2
+	ld	[$ap+64+12],$t3
+	ld	[$ap+64+16],$t4
+	ld	[$ap+64+20],$t5
+	ld	[$ap+64+24],$t6
+	ld	[$ap+64+28],$t7
 	or	$t1,$t0,$t0
 	or	$t3,$t2,$t2
 	or	$t5,$t4,$t4
 	or	$t7,$t6,$t6
 	or	$t2,$t0,$t0
 	or	$t6,$t4,$t4
-	or	$t4,$t0,$t0
-	or	@acc[0],$t0,$t0		! !in1infty
+	or	$t4,$t0,$t0		! !in1infty
 	movrnz	$t0,-1,$t0
 	st	$t0,[%fp+STACK_BIAS-16]
 
@@ -1341,6 +1340,7 @@ ___
 $code.=<<___;
 	ret
 	restore
+.type	ecp_nistz256_point_add_affine,#function
 .size	ecp_nistz256_point_add_affine,.-ecp_nistz256_point_add_affine
 ___
 }								}}}
@@ -1416,6 +1416,7 @@ ecp_nistz256_scatter_w5:
 
 	ret
 	restore
+.type	ecp_nistz256_scatter_w5,#function
 .size	ecp_nistz256_scatter_w5,.-ecp_nistz256_scatter_w5
 
 ! void	ecp_nistz256_gather_w5(P256_POINT *%i0,const void *%i1,
@@ -1513,6 +1514,7 @@ ecp_nistz256_gather_w5:
 
 	ret
 	restore
+.type	ecp_nistz256_gather_w5,#function
 .size	ecp_nistz256_gather_w5,.-ecp_nistz256_gather_w5
 
 ! void	ecp_nistz256_scatter_w7(void *%i0,const P256_POINT_AFFINE *%i1,
@@ -1528,18 +1530,19 @@ ecp_nistz256_scatter_w7:
 	ld	[$inp],%l0
 	add	$inp,4,$inp
 	subcc	$index,1,$index
-	stb	%l0,[$out+64*0-1]
+	stb	%l0,[$out+64*0]
 	srl	%l0,8,%l1
-	stb	%l1,[$out+64*1-1]
+	stb	%l1,[$out+64*1]
 	srl	%l0,16,%l2
-	stb	%l2,[$out+64*2-1]
+	stb	%l2,[$out+64*2]
 	srl	%l0,24,%l3
-	stb	%l3,[$out+64*3-1]
+	stb	%l3,[$out+64*3]
 	bne	.Loop_scatter_w7
 	add	$out,64*4,$out
 
 	ret
 	restore
+.type	ecp_nistz256_scatter_w7,#function
 .size	ecp_nistz256_scatter_w7,.-ecp_nistz256_scatter_w7
 
 ! void	ecp_nistz256_gather_w7(P256_POINT_AFFINE *%i0,const void *%i1,
@@ -1580,6 +1583,7 @@ ecp_nistz256_gather_w7:
 
 	ret
 	restore
+.type	ecp_nistz256_gather_w7,#function
 .size	ecp_nistz256_gather_w7,.-ecp_nistz256_gather_w7
 ___
 }}}
@@ -1587,7 +1591,7 @@ ___
 ########################################################################
 # Following subroutines are VIS3 counterparts of those above that
 # implement ones found in ecp_nistz256.c. Key difference is that they
-# use 128-bit muliplication and addition with 64-bit carry, and in order
+# use 128-bit multiplication and addition with 64-bit carry, and in order
 # to do that they perform conversion from uin32_t[8] to uint64_t[4] upon
 # entry and vice versa on return.
 #
@@ -1607,6 +1611,7 @@ __ecp_nistz256_mul_by_2_vis3:
 	addxccc	$acc3,$acc3,$acc3
 	b	.Lreduce_by_sub_vis3
 	addxc	%g0,%g0,$acc4		! did it carry?
+.type	__ecp_nistz256_mul_by_2_vis3,#function
 .size	__ecp_nistz256_mul_by_2_vis3,.-__ecp_nistz256_mul_by_2_vis3
 
 .align	32
@@ -1629,17 +1634,19 @@ __ecp_nistz256_add_noload_vis3:
 	addcc	$acc0,1,$t0		! add -modulus, i.e. subtract
 	addxccc	$acc1,$poly1,$t1
 	addxccc	$acc2,$minus1,$t2
-	addxc	$acc3,$poly3,$t3
+	addxccc	$acc3,$poly3,$t3
+	addxc	$acc4,$minus1,$acc4
 
-	movrnz	$acc4,$t0,$acc0		! if a+b carried, ret = ret-mod
-	movrnz	$acc4,$t1,$acc1
+	movrz	$acc4,$t0,$acc0		! ret = borrow ? ret : ret-modulus
+	movrz	$acc4,$t1,$acc1
 	stx	$acc0,[$rp]
-	movrnz	$acc4,$t2,$acc2
+	movrz	$acc4,$t2,$acc2
 	stx	$acc1,[$rp+8]
-	movrnz	$acc4,$t3,$acc3
+	movrz	$acc4,$t3,$acc3
 	stx	$acc2,[$rp+16]
 	retl
 	stx	$acc3,[$rp+24]
+.type	__ecp_nistz256_add_vis3,#function
 .size	__ecp_nistz256_add_vis3,.-__ecp_nistz256_add_vis3
 
 ! Trouble with subtraction is that there is no subtraction with 64-bit
@@ -1686,6 +1693,7 @@ __ecp_nistz256_sub_from_vis3:
 	subc	%g0,%g0,$acc4		! did it borrow?
 	b	.Lreduce_by_add_vis3
 	or	$acc3,$acc5,$acc3
+.type	__ecp_nistz256_sub_from_vis3,#function
 .size	__ecp_nistz256_sub_from_vis3,.-__ecp_nistz256_sub_from_vis3
 
 .align	32
@@ -1744,6 +1752,7 @@ __ecp_nistz256_sub_morf_vis3:
 	stx	$acc2,[$rp+16]
 	retl
 	stx	$acc3,[$rp+24]
+.type	__ecp_nistz256_sub_morf_vis3,#function
 .size	__ecp_nistz256_sub_morf_vis3,.-__ecp_nistz256_sub_morf_vis3
 
 .align	32
@@ -1784,6 +1793,7 @@ __ecp_nistz256_div_by_2_vis3:
 	stx	$acc2,[$rp+16]
 	retl
 	stx	$acc3,[$rp+24]
+.type	__ecp_nistz256_div_by_2_vis3,#function
 .size	__ecp_nistz256_div_by_2_vis3,.-__ecp_nistz256_div_by_2_vis3
 
 ! compared to __ecp_nistz256_mul_mont it's almost 4x smaller and
@@ -1863,7 +1873,7 @@ $code.=<<___	if ($i<3);
 	ldx	[$bp+8*($i+1)],$bi	! bp[$i+1]
 ___
 $code.=<<___;
-	addcc	$acc1,$t0,$acc1		! accumulate high parts of multiplication 
+	addcc	$acc1,$t0,$acc1		! accumulate high parts of multiplication
 	 sllx	$acc0,32,$t0
 	addxccc	$acc2,$t1,$acc2
 	 srlx	$acc0,32,$t1
@@ -1881,6 +1891,7 @@ $code.=<<___;
 	addxccc	$acc4,$t3,$acc3
 	b	.Lmul_final_vis3	! see below
 	addxc	$acc5,%g0,$acc4
+.type	__ecp_nistz256_mul_mont_vis3,#function
 .size	__ecp_nistz256_mul_mont_vis3,.-__ecp_nistz256_mul_mont_vis3
 
 ! compared to above __ecp_nistz256_mul_mont_vis3 it's 21% less
@@ -1965,7 +1976,7 @@ $code.=<<___;
 	 srlx	$acc0,32,$t1
 	addxccc	$acc3,$t2,$acc2		! +=acc[0]*0xFFFFFFFF00000001
 	 sub	$acc0,$t0,$t2		! acc0*0xFFFFFFFF00000001, low part
-	addxc	%g0,$t3,$acc3		! cant't overflow
+	addxc	%g0,$t3,$acc3		! can't overflow
 ___
 }
 $code.=<<___;
@@ -2005,6 +2016,7 @@ $code.=<<___;
 	stx	$acc2,[$rp+16]
 	retl
 	stx	$acc3,[$rp+24]
+.type	__ecp_nistz256_sqr_mont_vis3,#function
 .size	__ecp_nistz256_sqr_mont_vis3,.-__ecp_nistz256_sqr_mont_vis3
 ___
 
@@ -2268,6 +2280,7 @@ ecp_nistz256_point_double_vis3:
 
 	ret
 	restore
+.type	ecp_nistz256_point_double_vis3,#function
 .size	ecp_nistz256_point_double_vis3,.-ecp_nistz256_point_double_vis3
 ___
 }
@@ -2287,7 +2300,6 @@ my ($Z1sqr, $Z2sqr) = ($Hsqr, $Rsqr);
 # !in1infty, !in2infty and result of check for zero.
 
 $code.=<<___;
-.globl	ecp_nistz256_point_add_vis3
 .align	32
 ecp_nistz256_point_add_vis3:
 	save	%sp,-STACK64_FRAME-32*18-32,%sp
@@ -2340,16 +2352,6 @@ ecp_nistz256_point_add_vis3:
 	stx	$acc2,[%sp+LOCALS64+$in2_y+16]
 	stx	$acc3,[%sp+LOCALS64+$in2_y+24]
 
-	or	$a1,$a0,$a0
-	or	$a3,$a2,$a2
-	or	$acc1,$acc0,$acc0
-	or	$acc3,$acc2,$acc2
-	or	$a2,$a0,$a0
-	or	$acc2,$acc0,$acc0
-	or	$acc0,$a0,$a0
-	movrnz	$a0,-1,$a0			! !in2infty
-	stx	$a0,[%fp+STACK_BIAS-8]
-
 	ld	[$bp+64],$acc0			! in2_z
 	ld	[$bp+64+4],$t0
 	ld	[$bp+64+8],$acc1
@@ -2383,6 +2385,12 @@ ecp_nistz256_point_add_vis3:
 	stx	$acc2,[%sp+LOCALS64+$in2_z+16]
 	stx	$acc3,[%sp+LOCALS64+$in2_z+24]
 
+	or	$acc1,$acc0,$acc0
+	or	$acc3,$acc2,$acc2
+	or	$acc2,$acc0,$acc0
+	movrnz	$acc0,-1,$acc0			! !in2infty
+	stx	$acc0,[%fp+STACK_BIAS-8]
+
 	or	$a0,$t0,$a0
 	ld	[$ap+32],$acc0			! in1_y
 	or	$a1,$t1,$a1
@@ -2412,16 +2420,6 @@ ecp_nistz256_point_add_vis3:
 	stx	$acc2,[%sp+LOCALS64+$in1_y+16]
 	stx	$acc3,[%sp+LOCALS64+$in1_y+24]
 
-	or	$a1,$a0,$a0
-	or	$a3,$a2,$a2
-	or	$acc1,$acc0,$acc0
-	or	$acc3,$acc2,$acc2
-	or	$a2,$a0,$a0
-	or	$acc2,$acc0,$acc0
-	or	$acc0,$a0,$a0
-	movrnz	$a0,-1,$a0			! !in1infty
-	stx	$a0,[%fp+STACK_BIAS-16]
-
 	ldx	[%sp+LOCALS64+$in2_z],$a0	! forward load
 	ldx	[%sp+LOCALS64+$in2_z+8],$a1
 	ldx	[%sp+LOCALS64+$in2_z+16],$a2
@@ -2447,6 +2445,12 @@ ecp_nistz256_point_add_vis3:
 	or	$acc3,$t3,$acc3
 	stx	$acc2,[%sp+LOCALS64+$in1_z+16]
 	stx	$acc3,[%sp+LOCALS64+$in1_z+24]
+
+	or	$acc1,$acc0,$acc0
+	or	$acc3,$acc2,$acc2
+	or	$acc2,$acc0,$acc0
+	movrnz	$acc0,-1,$acc0			! !in1infty
+	stx	$acc0,[%fp+STACK_BIAS-16]
 
 	call	__ecp_nistz256_sqr_mont_vis3	! p256_sqr_mont(Z2sqr, in2_z);
 	add	%sp,LOCALS64+$Z2sqr,$rp
@@ -2688,6 +2692,7 @@ $code.=<<___;
 .Ladd_done_vis3:
 	ret
 	restore
+.type	ecp_nistz256_point_add_vis3,#function
 .size	ecp_nistz256_point_add_vis3,.-ecp_nistz256_point_add_vis3
 ___
 }
@@ -2808,16 +2813,6 @@ ecp_nistz256_point_add_affine_vis3:
 	stx	$acc2,[%sp+LOCALS64+$in1_y+16]
 	stx	$acc3,[%sp+LOCALS64+$in1_y+24]
 
-	or	$a1,$a0,$a0
-	or	$a3,$a2,$a2
-	or	$acc1,$acc0,$acc0
-	or	$acc3,$acc2,$acc2
-	or	$a2,$a0,$a0
-	or	$acc2,$acc0,$acc0
-	or	$acc0,$a0,$a0
-	movrnz	$a0,-1,$a0			! !in1infty
-	stx	$a0,[%fp+STACK_BIAS-16]
-
 	ld	[$ap+64],$a0			! in1_z
 	ld	[$ap+64+4],$t0
 	ld	[$ap+64+8],$a1
@@ -2838,6 +2833,12 @@ ecp_nistz256_point_add_affine_vis3:
 	or	$a3,$t3,$a3
 	stx	$a2,[%sp+LOCALS64+$in1_z+16]
 	stx	$a3,[%sp+LOCALS64+$in1_z+24]
+
+	or	$a1,$a0,$t0
+	or	$a3,$a2,$t2
+	or	$t2,$t0,$t0
+	movrnz	$t0,-1,$t0			! !in1infty
+	stx	$t0,[%fp+STACK_BIAS-16]
 
 	call	__ecp_nistz256_sqr_mont_vis3	! p256_sqr_mont(Z1sqr, in1_z);
 	add	%sp,LOCALS64+$Z1sqr,$rp
@@ -3006,6 +3007,7 @@ ___
 $code.=<<___;
 	ret
 	restore
+.type	ecp_nistz256_point_add_affine_vis3,#function
 .size	ecp_nistz256_point_add_affine_vis3,.-ecp_nistz256_point_add_affine_vis3
 .align	64
 .Lone_mont_vis3:
@@ -3054,4 +3056,4 @@ foreach (split("\n",$code)) {
 	print $_,"\n";
 }
 
-close STDOUT;
+close STDOUT or die "error closing STDOUT: $!";

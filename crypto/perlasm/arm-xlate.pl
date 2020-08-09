@@ -1,6 +1,12 @@
-#!/usr/bin/env perl
+#! /usr/bin/env perl
+# Copyright 2015-2020 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
 
-# ARM assembler distiller by <appro>.
+use strict;
 
 my $flavour = shift;
 my $output = shift;
@@ -21,6 +27,13 @@ my $arch = sub {
 my $fpu = sub {
     if ($flavour =~ /linux/)	{ ".fpu\t".join(',',@_); }
     else			{ ""; }
+};
+my $rodata = sub {
+    SWITCH: for ($flavour) {
+	/linux/		&& return ".section\t.rodata";
+	/ios/		&& return ".section\t__TEXT,__const";
+	last;
+    }
 };
 my $hidden = sub {
     if ($flavour =~ /ios/)	{ ".private_extern\t".join(',',@_); }
@@ -90,6 +103,12 @@ my $asciz = sub {
     {	"";	}
 };
 
+my $adrp = sub {
+    my ($args,$comment) = split(m|\s*//|,shift);
+    "\tadrp\t$args\@PAGE";
+} if ($flavour =~ /ios64/);
+
+
 sub range {
   my ($r,$sfx,$start,$end) = @_;
 
@@ -119,15 +138,19 @@ sub expand_line {
 
     $line =~ s/\b(\w+)/$GLOBALS{$1} or $1/ge;
 
+    if ($flavour =~ /ios64/) {
+	$line =~ s/#:lo12:(\w+)/$1\@PAGEOFF/;
+    }
+
     return $line;
 }
 
-while($line=<>) {
+while(my $line=<>) {
 
     if ($line =~ m/^\s*(#|@|\/\/)/)	{ print $line; next; }
 
     $line =~ s|/\*.*\*/||;	# get rid of C-style comments...
-    $line =~ s|^\s+||;		# ... and skip white spaces in beginning...
+    $line =~ s|^\s+||;		# ... and skip whitespace in beginning...
     $line =~ s|\s+$||;		# ... and at the end
 
     {
@@ -168,4 +191,4 @@ while($line=<>) {
     print "\n";
 }
 
-close STDOUT;
+close STDOUT or die "error closing STDOUT: $!";

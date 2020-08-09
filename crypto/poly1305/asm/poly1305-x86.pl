@@ -1,4 +1,11 @@
-#!/usr/bin/env perl
+#! /usr/bin/env perl
+# Copyright 2016-2020 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+
 #
 # ====================================================================
 # Written by Andy Polyakov <appro@openssl.org> for the OpenSSL
@@ -22,7 +29,9 @@
 # Westmere	4.58/+100%	1.43
 # Sandy Bridge	3.90/+100%	1.36
 # Haswell	3.88/+70%	1.18		0.72
+# Skylake	3.10/+60%	1.14		0.62
 # Silvermont	11.0/+40%	4.80
+# Goldmont	4.10/+200%	2.10
 # VIA Nano	6.71/+90%	2.47
 # Sledgehammer	3.51/+180%	4.27
 # Bulldozer	4.53/+140%	1.31
@@ -38,10 +47,9 @@ $0 =~ m/(.*[\/\\])[^\/\\]+$/; $dir=$1;
 push(@INC,"${dir}","${dir}../../perlasm");
 require "x86asm.pl";
 
-$output=pop;
-open STDOUT,">$output";
+$output=pop and open STDOUT,">$output";
 
-&asm_init($ARGV[0],"poly1305-x86.pl",$ARGV[$#ARGV] eq "386");
+&asm_init($ARGV[0],$ARGV[$#ARGV] eq "386");
 
 $sse2=$avx=0;
 for (@ARGV) { $sse2=1 if (/-DOPENSSL_IA32_SSE2/); }
@@ -62,7 +70,7 @@ if ($sse2) {
 	$avx = ($1>=2.09) + ($1>=2.10);
 	}
 
-	if (!$avx && `$ENV{CC} -v 2>&1` =~ /(^clang version|based on LLVM) ([3-9]\.[0-9]+)/) {
+	if (!$avx && `$ENV{CC} -v 2>&1` =~ /((?:^clang|LLVM) version|based on LLVM) ([0-9]+\.[0-9]+)/) {
 		$avx = ($2>=3.0) + ($2>3.0);
 	}
 }
@@ -299,6 +307,7 @@ if ($sse2) {
 	&adc	("ebx",0);
 	&adc	("ecx",0);
 	&adc	("esi",0);
+	&adc	("edi",0);
 
 	&cmp	("ebp",&wparam(2));		# done yet?
 	&jne	(&label("loop"));
@@ -544,6 +553,8 @@ my $extra = shift;
 	################################################################
 	# lazy reduction as discussed in "NEON crypto" by D.J. Bernstein
 	# and P. Schwabe
+	#
+	# [(*) see discussion in poly1305-armv4 module]
 
 	 &movdqa	($T0,$D3);
 	 &pand		($D3,$MASK);
@@ -563,12 +574,12 @@ my $extra = shift;
 							# possible, because
 							# paddq is "broken"
 							# on Atom
-	&pand		($D1,$MASK);
-	&paddq		($T1,$D2);			# h1 -> h2
 	 &psllq		($T0,2);
+	&paddq		($T1,$D2);			# h1 -> h2
+	 &paddq		($T0,$D0);			# h4 -> h0 (*)
+	&pand		($D1,$MASK);
 	&movdqa		($D2,$T1);
 	&psrlq		($T1,26);
-	 &paddd		($T0,$D0);			# h4 -> h0
 	&pand		($D2,$MASK);
 	&paddd		($T1,$D3);			# h2 -> h3
 	 &movdqa	($D0,$T0);
@@ -718,7 +729,7 @@ my $extra = shift;
 
 	&movdqa		($T0,$T1);			# -> base 2^26 ...
 	&pand		($T1,$MASK);
-	&paddd		($D0,$T1);			# ... and accumuate
+	&paddd		($D0,$T1);			# ... and accumulate
 
 	&movdqa		($T1,$T0);
 	&psrlq		($T0,26);
@@ -1165,11 +1176,12 @@ my $addr = shift;
 	&shr	("edi",2);
 	&lea	("ebp",&DWP(0,"edi","edi",4));	# *5
 	 &mov	("edi",&wparam(1));		# output
-	add	("eax","ebp");
+	&add	("eax","ebp");
 	 &mov	("ebp",&wparam(2));		# key
-	adc	("ebx",0);
-	adc	("ecx",0);
-	adc	("edx",0);
+	&adc	("ebx",0);
+	&adc	("ecx",0);
+	&adc	("edx",0);
+	&adc	("esi",0);
 
 	&movd	($D0,"eax");			# offload original hash value
 	&add	("eax",5);			# compare to modulus
@@ -1708,18 +1720,18 @@ sub vlazy_reduction {
 	&vpsrlq		($T1,$D1,26);
 	&vpand		($D1,$D1,$MASK);
 	&vpaddq		($D2,$D2,$T1);			# h1 -> h2
-	 &vpaddd	($D0,$D0,$T0);
+	 &vpaddq	($D0,$D0,$T0);
 	 &vpsllq	($T0,$T0,2);
 	&vpsrlq		($T1,$D2,26);
 	&vpand		($D2,$D2,$MASK);
-	 &vpaddd	($D0,$D0,$T0);			# h4 -> h0
-	&vpaddd		($D3,$D3,$T1);			# h2 -> h3
+	 &vpaddq	($D0,$D0,$T0);			# h4 -> h0
+	&vpaddq		($D3,$D3,$T1);			# h2 -> h3
 	&vpsrlq		($T1,$D3,26);
 	 &vpsrlq	($T0,$D0,26);
 	 &vpand		($D0,$D0,$MASK);
 	&vpand		($D3,$D3,$MASK);
-	 &vpaddd	($D1,$D1,$T0);			# h0 -> h1
-	&vpaddd		($D4,$D4,$T1);			# h3 -> h4
+	 &vpaddq	($D1,$D1,$T0);			# h0 -> h1
+	&vpaddq		($D4,$D4,$T1);			# h3 -> h4
 }
 	&vlazy_reduction();
 
@@ -1799,4 +1811,4 @@ sub vlazy_reduction {
 
 &asm_finish();
 
-close STDOUT;
+close STDOUT or die "error closing STDOUT: $!";

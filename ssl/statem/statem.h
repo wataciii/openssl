@@ -1,60 +1,15 @@
-/* ====================================================================
- * Copyright (c) 1998-2015 The OpenSSL Project.  All rights reserved.
+/*
+ * Copyright 2015-2018 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.openssl.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    openssl-core@openssl.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.openssl.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 /*****************************************************************************
  *                                                                           *
- * These emums should be considered PRIVATE to the state machine. No         *
+ * These enums should be considered PRIVATE to the state machine. No         *
  * non-state machine code should need to use these                           *
  *                                                                           *
  *****************************************************************************/
@@ -72,7 +27,9 @@ typedef enum {
     /* We're working on phase A */
     WORK_MORE_A,
     /* We're working on phase B */
-    WORK_MORE_B
+    WORK_MORE_B,
+    /* We're working on phase C */
+    WORK_MORE_C
 } WORK_STATE;
 
 /* Write transition return codes */
@@ -91,8 +48,6 @@ typedef enum {
     MSG_FLOW_UNINITED,
     /* A permanent error with this connection */
     MSG_FLOW_ERROR,
-    /* We are about to renegotiate */
-    MSG_FLOW_RENEGOTIATE,
     /* We are reading messages */
     MSG_FLOW_READING,
     /* We are writing messages */
@@ -116,6 +71,21 @@ typedef enum {
     WRITE_STATE_POST_WORK
 } WRITE_STATE;
 
+typedef enum {
+    /* The enc_write_ctx can be used normally */
+    ENC_WRITE_STATE_VALID,
+    /* The enc_write_ctx cannot be used */
+    ENC_WRITE_STATE_INVALID,
+    /* Write alerts in plaintext, but otherwise use the enc_write_ctx */
+    ENC_WRITE_STATE_WRITE_PLAIN_ALERTS
+} ENC_WRITE_STATES;
+
+typedef enum {
+    /* The enc_read_ctx can be used normally */
+    ENC_READ_STATE_VALID,
+    /* We may receive encrypted or plaintext alerts */
+    ENC_READ_STATE_ALLOW_PLAIN_ALERTS
+} ENC_READ_STATES;
 
 /*****************************************************************************
  *                                                                           *
@@ -132,22 +102,24 @@ struct ossl_statem_st {
     READ_STATE read_state;
     WORK_STATE read_state_work;
     OSSL_HANDSHAKE_STATE hand_state;
+    /* The handshake state requested by an API call (e.g. HelloRequest) */
+    OSSL_HANDSHAKE_STATE request_state;
     int in_init;
     int read_state_first_init;
-
     /* true when we are actually in SSL_accept() or SSL_connect() */
     int in_handshake;
-
+    /*
+     * True when are processing a "real" handshake that needs cleaning up (not
+     * just a HelloRequest or similar).
+     */
+    int cleanuphand;
     /* Should we skip the CertificateVerify message? */
     unsigned int no_cert_verify;
-
     int use_timer;
-#ifndef OPENSSL_NO_SCTP
-    int in_sctp_read_sock;
-#endif
+    ENC_WRITE_STATES enc_write_state;
+    ENC_READ_STATES enc_read_state;
 };
 typedef struct ossl_statem_st OSSL_STATEM;
-
 
 /*****************************************************************************
  *                                                                           *
@@ -160,16 +132,26 @@ __owur int ossl_statem_accept(SSL *s);
 __owur int ossl_statem_connect(SSL *s);
 void ossl_statem_clear(SSL *s);
 void ossl_statem_set_renegotiate(SSL *s);
-void ossl_statem_set_error(SSL *s);
+void ossl_statem_fatal(SSL *s, int al, int func, int reason, const char *file,
+                       int line);
+# define SSL_AD_NO_ALERT    -1
+# ifndef OPENSSL_NO_ERR
+#  define SSLfatal(s, al, f, r)  ossl_statem_fatal((s), (al), (0), (r), \
+                                                   OPENSSL_FILE, OPENSSL_LINE)
+# else
+#  define SSLfatal(s, al, f, r)  ossl_statem_fatal((s), (al), (0), (r), NULL, 0)
+# endif
+
 int ossl_statem_in_error(const SSL *s);
 void ossl_statem_set_in_init(SSL *s, int init);
 int ossl_statem_get_in_handshake(SSL *s);
 void ossl_statem_set_in_handshake(SSL *s, int inhand);
+__owur int ossl_statem_skip_early_data(SSL *s);
+void ossl_statem_check_finish_init(SSL *s, int send);
 void ossl_statem_set_hello_verify_done(SSL *s);
 __owur int ossl_statem_app_data_allowed(SSL *s);
-#ifndef OPENSSL_NO_SCTP
-void ossl_statem_set_sctp_read_sock(SSL *s, int read_sock);
-__owur int ossl_statem_in_sctp_read_sock(SSL *s);
-#endif
+__owur int ossl_statem_export_allowed(SSL *s);
+__owur int ossl_statem_export_early_allowed(SSL *s);
 
-
+/* Flush the write BIO */
+int statem_flush(SSL *s);

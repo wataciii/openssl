@@ -1,71 +1,26 @@
 /*
- * Written by Geoff Thorpe (geoff@geoffthorpe.net) for the OpenSSL project
- * 2000.
+ * Copyright 2001-2020 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright (c) 2002, Oracle and/or its affiliates. All rights reserved
+ *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
-/* ====================================================================
- * Copyright (c) 1999-2001 The OpenSSL Project.  All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+
+/* We need to use some engine deprecated APIs */
+#define OPENSSL_SUPPRESS_DEPRECATED
+
+/*
+ * RC4 and SHA-1 low level APIs and EVP _meth_ APISs are deprecated for public
+ * use, but still ok for internal use.
  */
-/* ====================================================================
- * Copyright 2002 Sun Microsystems, Inc. ALL RIGHTS RESERVED.
- * ECDH support in OpenSSL originally developed by
- * SUN MICROSYSTEMS, INC., and contributed to the OpenSSL project.
- */
+#include "internal/deprecated.h"
 
 #include <stdio.h>
 #include <openssl/crypto.h>
 #include "internal/cryptlib.h"
-#include <internal/engine.h>
-#include <openssl/dso.h>
+#include "crypto/engine.h"
 #include <openssl/pem.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -83,12 +38,14 @@
  */
 #define TEST_ENG_OPENSSL_RC4
 #ifndef OPENSSL_NO_STDIO
-#define TEST_ENG_OPENSSL_PKEY
+# define TEST_ENG_OPENSSL_PKEY
 #endif
 /* #define TEST_ENG_OPENSSL_HMAC */
 /* #define TEST_ENG_OPENSSL_HMAC_INIT */
 /* #define TEST_ENG_OPENSSL_RC4_OTHERS */
-#define TEST_ENG_OPENSSL_RC4_P_INIT
+#ifndef OPENSSL_NO_STDIO
+# define TEST_ENG_OPENSSL_RC4_P_INIT
+#endif
 /* #define TEST_ENG_OPENSSL_RC4_P_CIPHER */
 #define TEST_ENG_OPENSSL_SHA
 /* #define TEST_ENG_OPENSSL_SHA_OTHERS */
@@ -190,7 +147,7 @@ static ENGINE *engine_openssl(void)
     return ret;
 }
 
-void engine_load_openssl_internal(void)
+void engine_load_openssl_int(void)
 {
     ENGINE *toadd = engine_openssl();
     if (!toadd)
@@ -243,12 +200,15 @@ typedef struct {
 static int test_rc4_init_key(EVP_CIPHER_CTX *ctx, const unsigned char *key,
                              const unsigned char *iv, int enc)
 {
+    const int n = EVP_CIPHER_CTX_key_length(ctx);
+
 # ifdef TEST_ENG_OPENSSL_RC4_P_INIT
     fprintf(stderr, "(TEST_ENG_OPENSSL_RC4) test_init_key() called\n");
 # endif
-    memcpy(&test(ctx)->key[0], key, EVP_CIPHER_CTX_key_length(ctx));
-    RC4_set_key(&test(ctx)->ks, EVP_CIPHER_CTX_key_length(ctx),
-                test(ctx)->key);
+    if (n <= 0)
+        return n;
+    memcpy(&test(ctx)->key[0], key, n);
+    RC4_set_key(&test(ctx)->ks, n, test(ctx)->key);
     return 1;
 }
 
@@ -313,7 +273,7 @@ static void test_r4_40_cipher_destroy(void)
 }
 static int test_cipher_nids(const int **nids)
 {
-    static int cipher_nids[4] = { 0, 0, 0 };
+    static int cipher_nids[4] = { 0, 0, 0, 0 };
     static int pos = 0;
     static int init = 0;
 
@@ -485,11 +445,16 @@ static int ossl_hmac_init(EVP_PKEY_CTX *ctx)
 {
     OSSL_HMAC_PKEY_CTX *hctx;
 
-    hctx = OPENSSL_zalloc(sizeof(*hctx));
-    if (hctx == NULL)
+    if ((hctx = OPENSSL_zalloc(sizeof(*hctx))) == NULL) {
+        ENGINEerr(ENGINE_F_OSSL_HMAC_INIT, ERR_R_MALLOC_FAILURE);
         return 0;
+    }
     hctx->ktmp.type = V_ASN1_OCTET_STRING;
     hctx->ctx = HMAC_CTX_new();
+    if (hctx->ctx == NULL) {
+        OPENSSL_free(hctx);
+        return 0;
+    }
     EVP_PKEY_CTX_set_data(ctx, hctx);
     EVP_PKEY_CTX_set0_keygen_info(ctx, NULL, 0);
 # ifdef TEST_ENG_OPENSSL_HMAC_INIT
@@ -498,31 +463,42 @@ static int ossl_hmac_init(EVP_PKEY_CTX *ctx)
     return 1;
 }
 
+static void ossl_hmac_cleanup(EVP_PKEY_CTX *ctx);
+
 static int ossl_hmac_copy(EVP_PKEY_CTX *dst, EVP_PKEY_CTX *src)
 {
     OSSL_HMAC_PKEY_CTX *sctx, *dctx;
+
+    /* allocate memory for dst->data and a new HMAC_CTX in dst->data->ctx */
     if (!ossl_hmac_init(dst))
         return 0;
     sctx = EVP_PKEY_CTX_get_data(src);
     dctx = EVP_PKEY_CTX_get_data(dst);
     dctx->md = sctx->md;
     if (!HMAC_CTX_copy(dctx->ctx, sctx->ctx))
-        return 0;
+        goto err;
     if (sctx->ktmp.data) {
         if (!ASN1_OCTET_STRING_set(&dctx->ktmp,
                                    sctx->ktmp.data, sctx->ktmp.length))
-            return 0;
+            goto err;
     }
     return 1;
+err:
+    /* release HMAC_CTX in dst->data->ctx and memory allocated for dst->data */
+    ossl_hmac_cleanup(dst);
+    return 0;
 }
 
 static void ossl_hmac_cleanup(EVP_PKEY_CTX *ctx)
 {
     OSSL_HMAC_PKEY_CTX *hctx = EVP_PKEY_CTX_get_data(ctx);
 
-    HMAC_CTX_free(hctx->ctx);
-    OPENSSL_clear_free(hctx->ktmp.data, hctx->ktmp.length);
-    OPENSSL_free(hctx);
+    if (hctx) {
+        HMAC_CTX_free(hctx->ctx);
+        OPENSSL_clear_free(hctx->ktmp.data, hctx->ktmp.length);
+        OPENSSL_free(hctx);
+        EVP_PKEY_CTX_set_data(ctx, NULL);
+    }
 }
 
 static int ossl_hmac_keygen(EVP_PKEY_CTX *ctx, EVP_PKEY *pkey)
@@ -619,7 +595,7 @@ static int ossl_hmac_ctrl_str(EVP_PKEY_CTX *ctx,
         unsigned char *key;
         int r;
         long keylen;
-        key = string_to_hex(value, &keylen);
+        key = OPENSSL_hexstr2buf(value, &keylen);
         if (!key)
             return 0;
         r = ossl_hmac_ctrl(ctx, EVP_PKEY_CTRL_SET_MAC_KEY, keylen, key);
@@ -658,7 +634,8 @@ static int ossl_pkey_meths(ENGINE *e, EVP_PKEY_METHOD **pmeth,
         EVP_PKEY_HMAC,
         0
     };
-    if (!pmeth) {
+
+    if (pmeth == NULL) {
         *nids = ossl_pkey_nids;
         return 1;
     }

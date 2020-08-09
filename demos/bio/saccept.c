@@ -1,3 +1,12 @@
+/*
+ * Copyright 1998-2017 The OpenSSL Project Authors. All Rights Reserved.
+ *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
+ */
+
 /*-
  * A minimal program to serve an SSL connection.
  * It uses blocking.
@@ -10,14 +19,15 @@
 
 #include <stdio.h>
 #include <signal.h>
+#include <stdlib.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 
 #define CERT_FILE       "server.pem"
 
-static int done = 0;
+static volatile int done = 0;
 
-void interrupt()
+void interrupt(int sig)
 {
     done = 1;
 }
@@ -42,17 +52,12 @@ int main(int argc, char *argv[])
     BIO *ssl_bio, *tmp;
     SSL_CTX *ctx;
     char buf[512];
-    int ret = 1, i;
+    int ret = EXIT_FAILURE, i;
 
     if (argc <= 1)
         port = "*:4433";
     else
         port = argv[1];
-
-    SSL_load_error_strings();
-
-    /* Add ciphers and message digests */
-    OpenSSL_add_ssl_algorithms();
 
     ctx = SSL_CTX_new(TLS_server_method());
     if (!SSL_CTX_use_certificate_chain_file(ctx, CERT_FILE))
@@ -107,12 +112,10 @@ int main(int argc, char *argv[])
         fflush(stdout);
     }
 
-    ret = 0;
+    ret = EXIT_SUCCESS;
  err:
-    if (ret) {
+    if (ret != EXIT_SUCCESS)
         ERR_print_errors_fp(stderr);
-    }
     BIO_free(in);
-    exit(ret);
-    return (!ret);
+    return ret;
 }

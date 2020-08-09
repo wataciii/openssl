@@ -1,84 +1,33 @@
 /*
- * Written by Zoltan Glozik (zglozik@stones.com) for the OpenSSL project
- * 2002.
- */
-/* ====================================================================
- * Copyright (c) 2001 The OpenSSL Project.  All rights reserved.
+ * Copyright 2006-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 #include <openssl/opensslconf.h>
-#ifdef OPENSSL_NO_TS
-NON_EMPTY_TRANSLATION_UNIT
-#else
-# include <stdio.h>
-# include <stdlib.h>
-# include <string.h>
-# include "apps.h"
-# include <openssl/bio.h>
-# include <openssl/err.h>
-# include <openssl/pem.h>
-# include <openssl/rand.h>
-# include <openssl/ts.h>
-# include <openssl/bn.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "apps.h"
+#include "progs.h"
+#include <openssl/bio.h>
+#include <openssl/err.h>
+#include <openssl/pem.h>
+#include <openssl/rand.h>
+#include <openssl/ts.h>
+#include <openssl/bn.h>
 
 /* Request nonce length, in bits (must be a multiple of 8). */
-# define NONCE_LENGTH            64
+#define NONCE_LENGTH            64
 
 /* Name of config entry that defines the OID file. */
-# define ENV_OID_FILE            "oid_file"
+#define ENV_OID_FILE            "oid_file"
 
 /* Is |EXACTLY_ONE| of three pointers set? */
-# define EXACTLY_ONE(a, b, c) \
+#define EXACTLY_ONE(a, b, c) \
         (( a && !b && !c) || \
          ( b && !a && !c) || \
          ( c && !a && !b))
@@ -87,127 +36,137 @@ static ASN1_OBJECT *txt2obj(const char *oid);
 static CONF *load_config_file(const char *configfile);
 
 /* Query related functions. */
-static int query_command(const char *data, char *digest,
+static int query_command(const char *data, const char *digest,
                          const EVP_MD *md, const char *policy, int no_nonce,
                          int cert, const char *in, const char *out, int text);
-static TS_REQ *create_query(BIO *data_bio, char *digest, const EVP_MD *md,
+static TS_REQ *create_query(BIO *data_bio, const char *digest, const EVP_MD *md,
                             const char *policy, int no_nonce, int cert);
-static int create_digest(BIO *input, char *digest,
+static int create_digest(BIO *input, const char *digest,
                          const EVP_MD *md, unsigned char **md_value);
 static ASN1_INTEGER *create_nonce(int bits);
 
 /* Reply related functions. */
-static int reply_command(CONF *conf, char *section, char *engine,
-                         char *queryfile, char *passin, char *inkey,
-                         const EVP_MD *md, char *signer, char *chain,
-                         const char *policy, char *in, int token_in,
-                         char *out, int token_out, int text);
+static int reply_command(CONF *conf, const char *section, const char *engine,
+                         const char *queryfile, const char *passin, const char *inkey,
+                         const EVP_MD *md, const char *signer, const char *chain,
+                         const char *policy, const char *in, int token_in,
+                         const char *out, int token_out, int text);
 static TS_RESP *read_PKCS7(BIO *in_bio);
-static TS_RESP *create_response(CONF *conf, const char *section, char *engine,
-                                char *queryfile, char *passin,
-                                char *inkey, const EVP_MD *md, char *signer,
-                                char *chain, const char *policy);
+static TS_RESP *create_response(CONF *conf, const char *section, const char *engine,
+                                const char *queryfile, const char *passin,
+                                const char *inkey, const EVP_MD *md, const char *signer,
+                                const char *chain, const char *policy);
 static ASN1_INTEGER *serial_cb(TS_RESP_CTX *ctx, void *data);
 static ASN1_INTEGER *next_serial(const char *serialfile);
 static int save_ts_serial(const char *serialfile, ASN1_INTEGER *serial);
 
 /* Verify related functions. */
-static int verify_command(char *data, char *digest, char *queryfile,
-                          char *in, int token_in,
-                          char *CApath, char *CAfile, char *untrusted,
-                          X509_VERIFY_PARAM *vpm);
-static TS_VERIFY_CTX *create_verify_ctx(char *data, char *digest,
-                                        char *queryfile,
-                                        char *CApath, char *CAfile,
-                                        char *untrusted,
+static int verify_command(const char *data, const char *digest, const char *queryfile,
+                          const char *in, int token_in,
+                          const char *CApath, const char *CAfile,
+                          const char *CAstore,
+                          const char *untrusted, X509_VERIFY_PARAM *vpm);
+static TS_VERIFY_CTX *create_verify_ctx(const char *data, const char *digest,
+                                        const char *queryfile,
+                                        const char *CApath, const char *CAfile,
+                                        const char *CAstore,
+                                        const char *untrusted,
                                         X509_VERIFY_PARAM *vpm);
-static X509_STORE *create_cert_store(char *CApath, char *CAfile,
-                                     X509_VERIFY_PARAM *vpm);
+static X509_STORE *create_cert_store(const char *CApath, const char *CAfile,
+                                     const char *CAstore, X509_VERIFY_PARAM *vpm);
 static int verify_cb(int ok, X509_STORE_CTX *ctx);
 
 typedef enum OPTION_choice {
     OPT_ERR = -1, OPT_EOF = 0, OPT_HELP,
     OPT_ENGINE, OPT_CONFIG, OPT_SECTION, OPT_QUERY, OPT_DATA,
-    OPT_DIGEST, OPT_RAND, OPT_TSPOLICY, OPT_NO_NONCE, OPT_CERT,
+    OPT_DIGEST, OPT_TSPOLICY, OPT_NO_NONCE, OPT_CERT,
     OPT_IN, OPT_TOKEN_IN, OPT_OUT, OPT_TOKEN_OUT, OPT_TEXT,
     OPT_REPLY, OPT_QUERYFILE, OPT_PASSIN, OPT_INKEY, OPT_SIGNER,
-    OPT_CHAIN, OPT_VERIFY, OPT_CAPATH, OPT_CAFILE, OPT_UNTRUSTED,
-    OPT_MD, OPT_V_ENUM
+    OPT_CHAIN, OPT_VERIFY, OPT_CAPATH, OPT_CAFILE, OPT_CASTORE, OPT_UNTRUSTED,
+    OPT_MD, OPT_V_ENUM, OPT_R_ENUM, OPT_PROV_ENUM
 } OPTION_CHOICE;
 
-OPTIONS ts_options[] = {
+const OPTIONS ts_options[] = {
+    OPT_SECTION("General"),
     {"help", OPT_HELP, '-', "Display this summary"},
     {"config", OPT_CONFIG, '<', "Configuration file"},
     {"section", OPT_SECTION, 's', "Section to use within config file"},
+#ifndef OPENSSL_NO_ENGINE
+    {"engine", OPT_ENGINE, 's', "Use engine, possibly a hardware device"},
+#endif
+    {"inkey", OPT_INKEY, 's', "File with private key for reply"},
+    {"signer", OPT_SIGNER, 's', "Signer certificate file"},
+    {"chain", OPT_CHAIN, '<', "File with signer CA chain"},
+    {"CAfile", OPT_CAFILE, '<', "File with trusted CA certs"},
+    {"CApath", OPT_CAPATH, '/', "Path to trusted CA files"},
+    {"CAstore", OPT_CASTORE, ':', "URI to trusted CA store"},
+    {"untrusted", OPT_UNTRUSTED, '<', "File with untrusted certs"},
+    {"token_in", OPT_TOKEN_IN, '-', "Input is a PKCS#7 file"},
+    {"token_out", OPT_TOKEN_OUT, '-', "Output is a PKCS#7 file"},
+    {"passin", OPT_PASSIN, 's', "Input file pass phrase source"},
+    {"", OPT_MD, '-', "Any supported digest"},
+
+    OPT_SECTION("Query"),
     {"query", OPT_QUERY, '-', "Generate a TS query"},
     {"data", OPT_DATA, '<', "File to hash"},
     {"digest", OPT_DIGEST, 's', "Digest (as a hex string)"},
-    {"rand", OPT_RAND, 's',
-     "Load the file(s) into the random number generator"},
-    {"tspolicy", OPT_TSPOLICY, 's', "Policy OID to use"},
-    {"no_nonce", OPT_NO_NONCE, '-', "Do not include a nonce"},
+    {"queryfile", OPT_QUERYFILE, '<', "File containing a TS query"},
     {"cert", OPT_CERT, '-', "Put cert request into query"},
     {"in", OPT_IN, '<', "Input file"},
-    {"token_in", OPT_TOKEN_IN, '-', "Input is a PKCS#7 file"},
-    {"out", OPT_OUT, '>', "Output file"},
-    {"token_out", OPT_TOKEN_OUT, '-', "Output is a PKCS#7 file"},
-    {"text", OPT_TEXT, '-', "Output text (not DER)"},
-    {"reply", OPT_REPLY, '-', "Generate a TS reply"},
-    {"queryfile", OPT_QUERYFILE, '<', "File containing a TS query"},
-    {"passin", OPT_PASSIN, 's'},
-    {"inkey", OPT_INKEY, '<', "File with private key for reply"},
-    {"signer", OPT_SIGNER, 's'},
-    {"chain", OPT_CHAIN, '<', "File with signer CA chain"},
+
+    OPT_SECTION("Verify"),
     {"verify", OPT_VERIFY, '-', "Verify a TS response"},
-    {"CApath", OPT_CAPATH, '/', "Path to trusted CA files"},
-    {"CAfile", OPT_CAFILE, '<', "File with trusted CA certs"},
-    {"untrusted", OPT_UNTRUSTED, '<', "File with untrusted certs"},
-    {"", OPT_MD, '-', "Any supported digest"},
-# ifndef OPENSSL_NO_ENGINE
-    {"engine", OPT_ENGINE, 's', "Use engine, possibly a hardware device"},
-# endif
-    {OPT_HELP_STR, 1, '-', "\nOptions specific to 'ts -verify': \n"},
+    {"reply", OPT_REPLY, '-', "Generate a TS reply"},
+    {"tspolicy", OPT_TSPOLICY, 's', "Policy OID to use"},
+    {"no_nonce", OPT_NO_NONCE, '-', "Do not include a nonce"},
+    {"out", OPT_OUT, '>', "Output file"},
+    {"text", OPT_TEXT, '-', "Output text (not DER)"},
+
+    OPT_R_OPTIONS,
     OPT_V_OPTIONS,
-    {OPT_HELP_STR, 1, '-', "\n"},
+    OPT_PROV_OPTIONS,
     {NULL}
 };
 
 /*
- * This comand is so complex, special help is needed.
+ * This command is so complex, special help is needed.
  */
 static char* opt_helplist[] = {
+    "",
     "Typical uses:",
-    "ts -query [-rand file...] [-config file] [-data file]",
-    "          [-digest hexstring] [-tspolicy oid] [-no_nonce] [-cert]",
-    "          [-in file] [-out file] [-text]",
-    "  or",
-    "ts -reply [-config file] [-section tsa_section]",
-    "          [-queryfile file] [-passin password]",
-    "          [-signer tsa_cert.pem] [-inkey private_key.pem]",
-    "          [-chain certs_file.pem] [-tspolicy oid]",
-    "          [-in file] [-token_in] [-out file] [-token_out]",
-# ifndef OPENSSL_NO_ENGINE
-    "          [-text]",
-# else
-    "          [-text] [-engine id]",
-# endif
-    "  or",
-    "ts -verify -CApath dir -CAfile file.pem -untrusted file.pem",
-    "           [-data file] [-digest hexstring]",
-    "           [-queryfile file] -in file [-token_in]",
-    "           [[options specific to 'ts -verify']]",
+    " openssl ts -query [-rand file...] [-config file] [-data file]",
+    "    [-digest hexstring] [-tspolicy oid] [-no_nonce] [-cert]",
+    "    [-in file] [-out file] [-text]",
+    "",
+    " openssl ts -reply [-config file] [-section tsa_section]",
+    "    [-queryfile file] [-passin password]",
+    "    [-signer tsa_cert.pem] [-inkey private_key.pem]",
+    "    [-chain certs_file.pem] [-tspolicy oid]",
+    "    [-in file] [-token_in] [-out file] [-token_out]",
+#ifndef OPENSSL_NO_ENGINE
+    "    [-text] [-engine id]",
+#else
+    "    [-text]",
+#endif
+    "",
+    " openssl ts -verify -CApath dir -CAfile file.pem -CAstore uri",
+    "   -untrusted file.pem [-data file] [-digest hexstring]",
+    "    [-queryfile file] -in file [-token_in] ...",
     NULL,
 };
 
 int ts_main(int argc, char **argv)
 {
     CONF *conf = NULL;
-    char *CAfile = NULL, *untrusted = NULL, *engine = NULL, *prog, **helpp;
-    char *configfile = default_config_file;
-    char *section = NULL, *password = NULL;
-    char *data = NULL, *digest = NULL, *rnd = NULL, *policy = NULL;
+    const char *CAfile = NULL, *untrusted = NULL, *prog;
+    const char *configfile = default_config_file, *engine = NULL;
+    const char *section = NULL;
+    char **helpp;
+    char *password = NULL;
+    char *data = NULL, *digest = NULL, *policy = NULL;
     char *in = NULL, *out = NULL, *queryfile = NULL, *passin = NULL;
     char *inkey = NULL, *signer = NULL, *chain = NULL, *CApath = NULL;
+    char *CAstore = NULL;
     const EVP_MD *md = NULL;
     OPTION_CHOICE o, mode = OPT_ERR;
     int ret = 1, no_nonce = 0, cert = 0, text = 0;
@@ -254,8 +213,13 @@ int ts_main(int argc, char **argv)
         case OPT_DIGEST:
             digest = opt_arg();
             break;
-        case OPT_RAND:
-            rnd = opt_arg();
+        case OPT_R_CASES:
+            if (!opt_rand(o))
+                goto end;
+            break;
+        case OPT_PROV_CASES:
+            if (!opt_provider(o))
+                goto end;
             break;
         case OPT_TSPOLICY:
             policy = opt_arg();
@@ -302,6 +266,9 @@ int ts_main(int argc, char **argv)
         case OPT_CAFILE:
             CAfile = opt_arg();
             break;
+        case OPT_CASTORE:
+            CAstore = opt_arg();
+            break;
         case OPT_UNTRUSTED:
             untrusted = opt_arg();
             break;
@@ -319,20 +286,8 @@ int ts_main(int argc, char **argv)
             break;
         }
     }
-    argc = opt_num_rest();
-    argv = opt_rest();
-    if (mode == OPT_ERR || argc != 0)
+    if (mode == OPT_ERR || opt_num_rest() != 0)
         goto opthelp;
-
-    /* Seed the random number generator if it is going to be used. */
-    if (mode == OPT_QUERY && !no_nonce) {
-        if (!app_RAND_load_file(NULL, 1) && rnd == NULL)
-            BIO_printf(bio_err, "warning, not much extra random "
-                       "data, consider using the -rand option\n");
-        if (rnd != NULL)
-            BIO_printf(bio_err, "%ld semi-random bytes loaded\n",
-                       app_RAND_load_files(rnd));
-    }
 
     if (mode == OPT_REPLY && passin &&
         !app_passwd(passin, NULL, &password, NULL)) {
@@ -340,24 +295,20 @@ int ts_main(int argc, char **argv)
         goto end;
     }
 
-    conf = load_config_file(configfile);
-    if (!app_load_modules(conf))
+    if ((conf = load_config_file(configfile)) == NULL)
+        goto end;
+    if (configfile != default_config_file && !app_load_modules(conf))
         goto end;
 
     /* Check parameter consistency and execute the appropriate function. */
-    switch (mode) {
-    default:
-    case OPT_ERR:
-        goto opthelp;
-    case OPT_QUERY:
+    if (mode == OPT_QUERY) {
         if (vpmtouched)
             goto opthelp;
         if ((data != NULL) && (digest != NULL))
             goto opthelp;
         ret = !query_command(data, digest, md, policy, no_nonce, cert,
                              in, out, text);
-        break;
-    case OPT_REPLY:
+    } else if (mode == OPT_REPLY) {
         if (vpmtouched)
             goto opthelp;
         if ((in != NULL) && (queryfile != NULL))
@@ -369,22 +320,22 @@ int ts_main(int argc, char **argv)
         ret = !reply_command(conf, section, engine, queryfile,
                              password, inkey, md, signer, chain, policy,
                              in, token_in, out, token_out, text);
-        break;
-    case OPT_VERIFY:
+
+    } else if (mode == OPT_VERIFY) {
         if ((in == NULL) || !EXACTLY_ONE(queryfile, data, digest))
             goto opthelp;
         ret = !verify_command(data, digest, queryfile, in, token_in,
-                              CApath, CAfile, untrusted, 
+                              CApath, CAfile, CAstore, untrusted,
                               vpmtouched ? vpm : NULL);
+    } else {
+        goto opthelp;
     }
 
  end:
     X509_VERIFY_PARAM_free(vpm);
-    app_RAND_write_file(NULL);
     NCONF_free(conf);
     OPENSSL_free(password);
-    OBJ_cleanup();
-    return (ret);
+    return ret;
 }
 
 /*
@@ -429,7 +380,7 @@ static CONF *load_config_file(const char *configfile)
 /*
  * Query-related method definitions.
  */
-static int query_command(const char *data, char *digest, const EVP_MD *md,
+static int query_command(const char *data, const char *digest, const EVP_MD *md,
                          const char *policy, int no_nonce,
                          int cert, const char *in, const char *out, int text)
 {
@@ -476,7 +427,7 @@ static int query_command(const char *data, char *digest, const EVP_MD *md,
     return ret;
 }
 
-static TS_REQ *create_query(BIO *data_bio, char *digest, const EVP_MD *md,
+static TS_REQ *create_query(BIO *data_bio, const char *digest, const EVP_MD *md,
                             const char *policy, int no_nonce, int cert)
 {
     int ret = 0;
@@ -488,7 +439,7 @@ static TS_REQ *create_query(BIO *data_bio, char *digest, const EVP_MD *md,
     ASN1_OBJECT *policy_obj = NULL;
     ASN1_INTEGER *nonce_asn1 = NULL;
 
-    if (md == NULL && (md = EVP_get_digestbyname("sha1")) == NULL)
+    if (md == NULL && (md = EVP_get_digestbyname("sha256")) == NULL)
         goto err;
     if ((ts_req = TS_REQ_new()) == NULL)
         goto err;
@@ -540,36 +491,39 @@ static TS_REQ *create_query(BIO *data_bio, char *digest, const EVP_MD *md,
     return ts_req;
 }
 
-static int create_digest(BIO *input, char *digest, const EVP_MD *md,
+static int create_digest(BIO *input, const char *digest, const EVP_MD *md,
                          unsigned char **md_value)
 {
     int md_value_len;
+    int rv = 0;
+    EVP_MD_CTX *md_ctx = NULL;
 
     md_value_len = EVP_MD_size(md);
     if (md_value_len < 0)
         return 0;
 
-    if (input) {
-        EVP_MD_CTX *md_ctx = EVP_MD_CTX_new();
+    if (input != NULL) {
         unsigned char buffer[4096];
         int length;
 
+        md_ctx = EVP_MD_CTX_new();
         if (md_ctx == NULL)
             return 0;
         *md_value = app_malloc(md_value_len, "digest buffer");
-        EVP_DigestInit(md_ctx, md);
+        if (!EVP_DigestInit(md_ctx, md))
+            goto err;
         while ((length = BIO_read(input, buffer, sizeof(buffer))) > 0) {
-            EVP_DigestUpdate(md_ctx, buffer, length);
+            if (!EVP_DigestUpdate(md_ctx, buffer, length))
+                goto err;
         }
-        if (!EVP_DigestFinal(md_ctx, *md_value, NULL)) {
-            EVP_MD_CTX_free(md_ctx);
-            return 0;
-        }
-        EVP_MD_CTX_free(md_ctx);
+        if (!EVP_DigestFinal(md_ctx, *md_value, NULL))
+            goto err;
+        md_value_len = EVP_MD_size(md);
     } else {
         long digest_len;
-        *md_value = string_to_hex(digest, &digest_len);
-        if (!*md_value || md_value_len != digest_len) {
+
+        *md_value = OPENSSL_hexstr2buf(digest, &digest_len);
+        if (*md_value == NULL || md_value_len != digest_len) {
             OPENSSL_free(*md_value);
             *md_value = NULL;
             BIO_printf(bio_err, "bad digest, %d bytes "
@@ -577,7 +531,10 @@ static int create_digest(BIO *input, char *digest, const EVP_MD *md,
             return 0;
         }
     }
-    return md_value_len;
+    rv = md_value_len;
+ err:
+    EVP_MD_CTX_free(md_ctx);
+    return rv;
 }
 
 static ASN1_INTEGER *create_nonce(int bits)
@@ -613,11 +570,11 @@ static ASN1_INTEGER *create_nonce(int bits)
  * Reply-related method definitions.
  */
 
-static int reply_command(CONF *conf, char *section, char *engine,
-                         char *queryfile, char *passin, char *inkey,
-                         const EVP_MD *md, char *signer, char *chain,
-                         const char *policy, char *in, int token_in,
-                         char *out, int token_out, int text)
+static int reply_command(CONF *conf, const char *section, const char *engine,
+                         const char *queryfile, const char *passin, const char *inkey,
+                         const EVP_MD *md, const char *signer, const char *chain,
+                         const char *policy, const char *in, int token_in,
+                         const char *out, int token_out, int text)
 {
     int ret = 0;
     TS_RESP *response = NULL;
@@ -638,7 +595,7 @@ static int reply_command(CONF *conf, char *section, char *engine,
     } else {
         response = create_response(conf, section, engine, queryfile,
                                    passin, inkey, md, signer, chain, policy);
-        if (response)
+        if (response != NULL)
             BIO_printf(bio_err, "Response has been generated.\n");
         else
             BIO_printf(bio_err, "Response is not generated.\n");
@@ -721,10 +678,10 @@ static TS_RESP *read_PKCS7(BIO *in_bio)
     return resp;
 }
 
-static TS_RESP *create_response(CONF *conf, const char *section, char *engine,
-                                char *queryfile, char *passin,
-                                char *inkey, const EVP_MD *md, char *signer,
-                                char *chain, const char *policy)
+static TS_RESP *create_response(CONF *conf, const char *section, const char *engine,
+                                const char *queryfile, const char *passin,
+                                const char *inkey, const EVP_MD *md, const char *signer,
+                                const char *chain, const char *policy)
 {
     int ret = 0;
     TS_RESP *response = NULL;
@@ -739,10 +696,10 @@ static TS_RESP *create_response(CONF *conf, const char *section, char *engine,
         goto end;
     if (!TS_CONF_set_serial(conf, section, serial_cb, resp_ctx))
         goto end;
-# ifndef OPENSSL_NO_ENGINE
+#ifndef OPENSSL_NO_ENGINE
     if (!TS_CONF_set_crypto_device(conf, section, engine))
         goto end;
-# endif
+#endif
     if (!TS_CONF_set_signer_cert(conf, section, signer, resp_ctx))
         goto end;
     if (!TS_CONF_set_certs(conf, section, chain, resp_ctx))
@@ -757,6 +714,8 @@ static TS_RESP *create_response(CONF *conf, const char *section, char *engine,
             goto end;
     }
 
+    if (!TS_CONF_set_ess_cert_id_digest(conf, section, resp_ctx))
+        goto end;
     if (!TS_CONF_set_def_policy(conf, section, policy, resp_ctx))
         goto end;
     if (!TS_CONF_set_policies(conf, section, resp_ctx))
@@ -792,13 +751,14 @@ static ASN1_INTEGER *serial_cb(TS_RESP_CTX *ctx, void *data)
     const char *serial_file = (const char *)data;
     ASN1_INTEGER *serial = next_serial(serial_file);
 
-    if (!serial) {
+    if (serial == NULL) {
         TS_RESP_CTX_set_status_info(ctx, TS_STATUS_REJECTION,
                                     "Error during serial number "
                                     "generation.");
         TS_RESP_CTX_add_failure_info(ctx, TS_INFO_ADD_INFO_NOT_AVAILABLE);
-    } else
+    } else {
         save_ts_serial(serial_file, serial);
+    }
 
     return serial;
 }
@@ -872,9 +832,10 @@ static int save_ts_serial(const char *serialfile, ASN1_INTEGER *serial)
  * Verify-related method definitions.
  */
 
-static int verify_command(char *data, char *digest, char *queryfile,
-                          char *in, int token_in,
-                          char *CApath, char *CAfile, char *untrusted,
+static int verify_command(const char *data, const char *digest, const char *queryfile,
+                          const char *in, int token_in,
+                          const char *CApath, const char *CAfile,
+                          const char *CAstore, const char *untrusted,
                           X509_VERIFY_PARAM *vpm)
 {
     BIO *in_bio = NULL;
@@ -894,7 +855,7 @@ static int verify_command(char *data, char *digest, char *queryfile,
     }
 
     if ((verify_ctx = create_verify_ctx(data, digest, queryfile,
-                                        CApath, CAfile, untrusted,
+                                        CApath, CAfile, CAstore, untrusted,
                                         vpm)) == NULL)
         goto end;
 
@@ -918,10 +879,11 @@ static int verify_command(char *data, char *digest, char *queryfile,
     return ret;
 }
 
-static TS_VERIFY_CTX *create_verify_ctx(char *data, char *digest,
-                                        char *queryfile,
-                                        char *CApath, char *CAfile,
-                                        char *untrusted,
+static TS_VERIFY_CTX *create_verify_ctx(const char *data, const char *digest,
+                                        const char *queryfile,
+                                        const char *CApath, const char *CAfile,
+                                        const char *CAstore,
+                                        const char *untrusted,
                                         X509_VERIFY_PARAM *vpm)
 {
     TS_VERIFY_CTX *ctx = NULL;
@@ -935,12 +897,18 @@ static TS_VERIFY_CTX *create_verify_ctx(char *data, char *digest,
             goto err;
         f = TS_VFY_VERSION | TS_VFY_SIGNER;
         if (data != NULL) {
+            BIO *out = NULL;
+
             f |= TS_VFY_DATA;
-            if (TS_VERIFY_CTX_set_data(ctx, BIO_new_file(data, "rb")) == NULL)
+            if ((out = BIO_new_file(data, "rb")) == NULL)
                 goto err;
+            if (TS_VERIFY_CTX_set_data(ctx, out) == NULL) {
+                BIO_free_all(out);
+                goto err;
+            }
         } else if (digest != NULL) {
             long imprint_len;
-            unsigned char *hexstr = string_to_hex(digest, &imprint_len);
+            unsigned char *hexstr = OPENSSL_hexstr2buf(digest, &imprint_len);
             f |= TS_VFY_IMPRINT;
             if (TS_VERIFY_CTX_set_imprint(ctx, hexstr, imprint_len) == NULL) {
                 BIO_printf(bio_err, "invalid digest string\n");
@@ -955,20 +923,22 @@ static TS_VERIFY_CTX *create_verify_ctx(char *data, char *digest,
             goto err;
         if ((ctx = TS_REQ_to_TS_VERIFY_CTX(request, NULL)) == NULL)
             goto err;
-    } else
+    } else {
         return NULL;
+    }
 
     /* Add the signature verification flag and arguments. */
     TS_VERIFY_CTX_add_flags(ctx, f | TS_VFY_SIGNATURE);
 
     /* Initialising the X509_STORE object. */
-    if (TS_VERIFY_CTX_set_store(ctx, create_cert_store(CApath, CAfile, vpm))
+    if (TS_VERIFY_CTX_set_store(ctx,
+                                create_cert_store(CApath, CAfile, CAstore, vpm))
             == NULL)
         goto err;
 
     /* Loading untrusted certificates. */
     if (untrusted
-        && TS_VERIFY_CTS_set_certs(ctx, TS_CONF_load_certs(untrusted)) == NULL)
+        && TS_VERIFY_CTX_set_certs(ctx, TS_CONF_load_certs(untrusted)) == NULL)
         goto err;
     ret = 1;
 
@@ -982,11 +952,13 @@ static TS_VERIFY_CTX *create_verify_ctx(char *data, char *digest,
     return ctx;
 }
 
-static X509_STORE *create_cert_store(char *CApath, char *CAfile, X509_VERIFY_PARAM *vpm)
+static X509_STORE *create_cert_store(const char *CApath, const char *CAfile,
+                                     const char *CAstore, X509_VERIFY_PARAM *vpm)
 {
     X509_STORE *cert_ctx = NULL;
     X509_LOOKUP *lookup = NULL;
-    int i;
+    OPENSSL_CTX *libctx = app_get0_libctx();
+    const char *propq = app_get0_propq();
 
     cert_ctx = X509_STORE_new();
     X509_STORE_set_verify_cb(cert_ctx, verify_cb);
@@ -996,8 +968,7 @@ static X509_STORE *create_cert_store(char *CApath, char *CAfile, X509_VERIFY_PAR
             BIO_printf(bio_err, "memory allocation failure\n");
             goto err;
         }
-        i = X509_LOOKUP_add_dir(lookup, CApath, X509_FILETYPE_PEM);
-        if (!i) {
+        if (!X509_LOOKUP_add_dir(lookup, CApath, X509_FILETYPE_PEM)) {
             BIO_printf(bio_err, "Error loading directory %s\n", CApath);
             goto err;
         }
@@ -1009,14 +980,27 @@ static X509_STORE *create_cert_store(char *CApath, char *CAfile, X509_VERIFY_PAR
             BIO_printf(bio_err, "memory allocation failure\n");
             goto err;
         }
-        i = X509_LOOKUP_load_file(lookup, CAfile, X509_FILETYPE_PEM);
-        if (!i) {
+        if (!X509_LOOKUP_load_file_with_libctx(lookup, CAfile,
+                                               X509_FILETYPE_PEM,
+                                               libctx, propq)) {
             BIO_printf(bio_err, "Error loading file %s\n", CAfile);
             goto err;
         }
     }
 
-    if (vpm != NULL) 
+    if (CAstore != NULL) {
+        lookup = X509_STORE_add_lookup(cert_ctx, X509_LOOKUP_store());
+        if (lookup == NULL) {
+            BIO_printf(bio_err, "memory allocation failure\n");
+            goto err;
+        }
+        if (!X509_LOOKUP_load_store_with_libctx(lookup, CAstore, libctx, propq)) {
+            BIO_printf(bio_err, "Error loading store URI %s\n", CAstore);
+            goto err;
+        }
+    }
+
+    if (vpm != NULL)
         X509_STORE_set1_param(cert_ctx, vpm);
 
     return cert_ctx;
@@ -1030,4 +1014,3 @@ static int verify_cb(int ok, X509_STORE_CTX *ctx)
 {
     return ok;
 }
-#endif

@@ -1,95 +1,46 @@
-/* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
- * All rights reserved.
+/*
+ * Copyright 1995-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * This package is an SSL implementation written
- * by Eric Young (eay@cryptsoft.com).
- * The implementation was written so as to conform with Netscapes SSL.
- *
- * This library is free for commercial and non-commercial use as long as
- * the following conditions are aheared to.  The following conditions
- * apply to all code found in this distribution, be it the RC4, RSA,
- * lhash, DES, etc., code; not just the SSL code.  The SSL documentation
- * included with this distribution is covered by the same copyright terms
- * except that the holder is Tim Hudson (tjh@cryptsoft.com).
- *
- * Copyright remains Eric Young's, and as such any Copyright notices in
- * the code are not to be removed.
- * If this package is used in a product, Eric Young should be given attribution
- * as the author of the parts of the library used.
- * This can be in the form of a textual message at program startup or
- * in documentation (online or textual) provided with the package.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. All advertising materials mentioning features or use of this software
- *    must display the following acknowledgement:
- *    "This product includes cryptographic software written by
- *     Eric Young (eay@cryptsoft.com)"
- *    The word 'cryptographic' can be left out if the rouines from the library
- *    being used are not cryptographic related :-).
- * 4. If you include any Windows specific code (or a derivative thereof) from
- *    the apps directory (application code) you must include an acknowledgement:
- *    "This product includes software written by Tim Hudson (tjh@cryptsoft.com)"
- *
- * THIS SOFTWARE IS PROVIDED BY ERIC YOUNG ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- *
- * The licence and distribution terms for any publically available version or
- * derivative of this code cannot be changed.  i.e. this code cannot simply be
- * copied and put under another distribution licence
- * [including the GNU Public Licence.]
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 /* Part of the code in here was originally in conf.c, which is now removed */
 
+#include "e_os.h"
+#include "internal/cryptlib.h"
 #include <stdlib.h>
 #include <string.h>
 #include <openssl/conf.h>
 #include <openssl/conf_api.h>
-#include "e_os.h"
+
+DEFINE_STACK_OF(CONF_VALUE)
 
 static void value_free_hash(const CONF_VALUE *a, LHASH_OF(CONF_VALUE) *conf);
 static void value_free_stack_doall(CONF_VALUE *a);
 
-/* Up until OpenSSL 0.9.5a, this was get_section */
 CONF_VALUE *_CONF_get_section(const CONF *conf, const char *section)
 {
-    CONF_VALUE *v, vv;
+    CONF_VALUE vv;
 
-    if ((conf == NULL) || (section == NULL))
-        return (NULL);
+    if (conf == NULL || section == NULL)
+        return NULL;
     vv.name = NULL;
     vv.section = (char *)section;
-    v = lh_CONF_VALUE_retrieve(conf->data, &vv);
-    return (v);
+    return lh_CONF_VALUE_retrieve(conf->data, &vv);
 }
 
-/* Up until OpenSSL 0.9.5a, this was CONF_get_section */
 STACK_OF(CONF_VALUE) *_CONF_get_section_values(const CONF *conf,
                                                const char *section)
 {
     CONF_VALUE *v;
 
     v = _CONF_get_section(conf, section);
-    if (v != NULL)
-        return ((STACK_OF(CONF_VALUE) *)v->value);
-    else
-        return (NULL);
+    if (v == NULL)
+        return NULL;
+    return ((STACK_OF(CONF_VALUE) *)v->value);
 }
 
 int _CONF_add_string(CONF *conf, CONF_VALUE *section, CONF_VALUE *value)
@@ -100,9 +51,8 @@ int _CONF_add_string(CONF *conf, CONF_VALUE *section, CONF_VALUE *value)
     ts = (STACK_OF(CONF_VALUE) *)section->value;
 
     value->section = section->section;
-    if (!sk_CONF_VALUE_push(ts, value)) {
+    if (!sk_CONF_VALUE_push(ts, value))
         return 0;
-    }
 
     v = lh_CONF_VALUE_insert(conf->data, value);
     if (v != NULL) {
@@ -121,34 +71,32 @@ char *_CONF_get_string(const CONF *conf, const char *section,
     char *p;
 
     if (name == NULL)
-        return (NULL);
-    if (conf != NULL) {
-        if (section != NULL) {
-            vv.name = (char *)name;
-            vv.section = (char *)section;
-            v = lh_CONF_VALUE_retrieve(conf->data, &vv);
-            if (v != NULL)
-                return (v->value);
-            if (strcmp(section, "ENV") == 0) {
-                p = getenv(name);
-                if (p != NULL)
-                    return (p);
-            }
-        }
-        vv.section = "default";
+        return NULL;
+    if (conf == NULL)
+        return ossl_safe_getenv(name);
+    if (section != NULL) {
         vv.name = (char *)name;
+        vv.section = (char *)section;
         v = lh_CONF_VALUE_retrieve(conf->data, &vv);
         if (v != NULL)
-            return (v->value);
-        else
-            return (NULL);
-    } else
-        return (getenv(name));
+            return v->value;
+        if (strcmp(section, "ENV") == 0) {
+            p = ossl_safe_getenv(name);
+            if (p != NULL)
+                return p;
+        }
+    }
+    vv.section = "default";
+    vv.name = (char *)name;
+    v = lh_CONF_VALUE_retrieve(conf->data, &vv);
+    if (v == NULL)
+        return NULL;
+    return v->value;
 }
 
 static unsigned long conf_value_hash(const CONF_VALUE *v)
 {
-    return (lh_strhash(v->section) << 2) ^ lh_strhash(v->name);
+    return (OPENSSL_LH_strhash(v->section) << 2) ^ OPENSSL_LH_strhash(v->name);
 }
 
 static int conf_value_cmp(const CONF_VALUE *a, const CONF_VALUE *b)
@@ -157,24 +105,21 @@ static int conf_value_cmp(const CONF_VALUE *a, const CONF_VALUE *b)
 
     if (a->section != b->section) {
         i = strcmp(a->section, b->section);
-        if (i)
-            return (i);
+        if (i != 0)
+            return i;
     }
 
-    if ((a->name != NULL) && (b->name != NULL)) {
-        i = strcmp(a->name, b->name);
-        return (i);
-    } else if (a->name == b->name)
-        return (0);
-    else
-        return ((a->name == NULL) ? -1 : 1);
+    if (a->name != NULL && b->name != NULL)
+        return strcmp(a->name, b->name);
+    if (a->name == b->name)
+        return 0;
+    return (a->name == NULL) ? -1 : 1;
 }
 
 int _CONF_new_data(CONF *conf)
 {
-    if (conf == NULL) {
+    if (conf == NULL)
         return 0;
-    }
     if (conf->data == NULL) {
         conf->data = lh_CONF_VALUE_new(conf_value_hash, conf_value_cmp);
         if (conf->data == NULL)
@@ -232,7 +177,6 @@ static void value_free_stack_doall(CONF_VALUE *a)
     OPENSSL_free(a);
 }
 
-/* Up until OpenSSL 0.9.5a, this was new_section */
 CONF_VALUE *_CONF_new_section(CONF *conf, const char *section)
 {
     STACK_OF(CONF_VALUE) *sk = NULL;
@@ -252,11 +196,14 @@ CONF_VALUE *_CONF_new_section(CONF *conf, const char *section)
     v->value = (char *)sk;
 
     vv = lh_CONF_VALUE_insert(conf->data, v);
-    OPENSSL_assert(vv == NULL);
+    if (vv != NULL || lh_CONF_VALUE_error(conf->data) > 0)
+        goto err;
     return v;
 
  err:
     sk_CONF_VALUE_free(sk);
+    if (v != NULL)
+        OPENSSL_free(v->section);
     OPENSSL_free(v);
     return NULL;
 }

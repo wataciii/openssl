@@ -1,26 +1,38 @@
-#!/usr/bin/env perl
+#! /usr/bin/env perl
+# Copyright 2015-2020 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
 
-$flavour = shift;
-$output  = shift;
+
+# $output is the last argument if it looks like a file (it has an extension)
+# $flavour is the first argument if it doesn't look like a file
+$output = $#ARGV >= 0 && $ARGV[$#ARGV] =~ m|\.\w+$| ? pop : undef;
+$flavour = $#ARGV >= 0 && $ARGV[0] !~ m|\.| ? shift : undef;
 
 $0 =~ m/(.*[\/\\])[^\/\\]+$/; $dir=$1;
 ( $xlate="${dir}arm-xlate.pl" and -f $xlate ) or
 ( $xlate="${dir}perlasm/arm-xlate.pl" and -f $xlate) or
 die "can't locate arm-xlate.pl";
 
-open OUT,"| \"$^X\" $xlate $flavour $output";
+open OUT,"| \"$^X\" $xlate $flavour \"$output\""
+    or die "can't call $xlate: $!";
 *STDOUT=*OUT;
 
 $code.=<<___;
 #include "arm_arch.h"
 
-.text
 #if defined(__thumb2__) && !defined(__APPLE__)
 .syntax	unified
 .thumb
 #else
 .code	32
+#undef	__thumb2__
 #endif
+
+.text
 
 .align	5
 .global	OPENSSL_atomic_add
@@ -97,6 +109,36 @@ OPENSSL_cleanse:
 	.word	0xe12fff1e	@ bx	lr
 #endif
 .size	OPENSSL_cleanse,.-OPENSSL_cleanse
+
+.global	CRYPTO_memcmp
+.type	CRYPTO_memcmp,%function
+.align	4
+CRYPTO_memcmp:
+	eor	ip,ip,ip
+	cmp	r2,#0
+	beq	.Lno_data
+	stmdb	sp!,{r4,r5}
+
+.Loop_cmp:
+	ldrb	r4,[r0],#1
+	ldrb	r5,[r1],#1
+	eor	r4,r4,r5
+	orr	ip,ip,r4
+	subs	r2,r2,#1
+	bne	.Loop_cmp
+
+	ldmia	sp!,{r4,r5}
+.Lno_data:
+	rsb	r0,ip,#0
+	mov	r0,r0,lsr#31
+#if __ARM_ARCH__>=5
+	bx	lr
+#else
+	tst	lr,#1
+	moveq	pc,lr
+	.word	0xe12fff1e	@ bx	lr
+#endif
+.size	CRYPTO_memcmp,.-CRYPTO_memcmp
 
 #if __ARM_MAX_ARCH__>=7
 .arch	armv7-a
@@ -255,4 +297,4 @@ atomic_add_spinlock:
 ___
 
 print $code;
-close STDOUT;
+close STDOUT or die "error closing STDOUT: $!";

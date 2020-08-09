@@ -1,100 +1,39 @@
 /*
- * Written by Matt Caswell for the OpenSSL project.
- */
-/* ====================================================================
- * Copyright (c) 2016 The OpenSSL Project.  All rights reserved.
+ * Copyright 2016-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.openssl.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    openssl-core@openssl.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.openssl.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
-#include <internal/threads.h>
-#include <internal/cryptlib_int.h>
+/* We need to use some engine deprecated APIs */
+#define OPENSSL_SUPPRESS_DEPRECATED
+
+#include "e_os.h"
+#include "crypto/cryptlib.h"
 #include <openssl/err.h>
-#include <openssl/rand.h>
+#include "crypto/rand.h"
+#include "internal/bio.h"
 #include <openssl/evp.h>
-#include <internal/evp_int.h>
-#include <internal/conf.h>
-#include <internal/async.h>
-#include <internal/engine.h>
-#include <openssl/comp.h>
-#include <internal/err.h>
+#include "crypto/evp.h"
+#include "internal/conf.h"
+#include "crypto/async.h"
+#include "crypto/engine.h"
+#include "internal/comp.h"
+#include "internal/err.h"
+#include "crypto/err.h"
+#include "crypto/objects.h"
 #include <stdlib.h>
 #include <assert.h>
+#include "internal/thread_once.h"
+#include "crypto/dso_conf.h"
+#include "internal/dso.h"
+#include "crypto/store.h"
+#include <openssl/cmp_util.h> /* for OSSL_CMP_log_close() */
+#include <openssl/trace.h>
 
 static int stopped = 0;
-
-static void ossl_init_thread_stop(struct thread_local_inits_st *locals);
-
-static CRYPTO_THREAD_LOCAL threadstopkey;
-
-static void ossl_init_thread_stop_wrap(void *local)
-{
-    ossl_init_thread_stop((struct thread_local_inits_st *)local);
-}
-
-static struct thread_local_inits_st *ossl_init_get_thread_local(int alloc)
-{
-    struct thread_local_inits_st *local =
-        CRYPTO_THREAD_get_local(&threadstopkey);
-
-    if (local == NULL && alloc) {
-        local = OPENSSL_zalloc(sizeof *local);
-        CRYPTO_THREAD_set_local(&threadstopkey, local);
-    }
-    if (!alloc) {
-        CRYPTO_THREAD_set_local(&threadstopkey, NULL);
-    }
-
-    return local;
-}
 
 typedef struct ossl_init_stop_st OPENSSL_INIT_STOP;
 struct ossl_init_stop_st {
@@ -107,216 +46,276 @@ static CRYPTO_RWLOCK *init_lock = NULL;
 
 static CRYPTO_ONCE base = CRYPTO_ONCE_STATIC_INIT;
 static int base_inited = 0;
-static void ossl_init_base(void)
+DEFINE_RUN_ONCE_STATIC(ossl_init_base)
+{
+    /* no need to init trace */
+
+    OSSL_TRACE(INIT, "ossl_init_base: setting up stop handlers\n");
+#ifndef OPENSSL_NO_CRYPTO_MDEBUG
+    ossl_malloc_setup_failures();
+#endif
+
+    if ((init_lock = CRYPTO_THREAD_lock_new()) == NULL)
+        goto err;
+    OPENSSL_cpuid_setup();
+
+    if (!ossl_init_thread())
+        return 0;
+
+    base_inited = 1;
+    return 1;
+
+err:
+    OSSL_TRACE(INIT, "ossl_init_base failed!\n");
+    CRYPTO_THREAD_lock_free(init_lock);
+    init_lock = NULL;
+
+    return 0;
+}
+
+static CRYPTO_ONCE register_atexit = CRYPTO_ONCE_STATIC_INIT;
+#if !defined(OPENSSL_SYS_UEFI) && defined(_WIN32)
+static int win32atexit(void)
+{
+    OPENSSL_cleanup();
+    return 0;
+}
+#endif
+
+DEFINE_RUN_ONCE_STATIC(ossl_init_register_atexit)
 {
 #ifdef OPENSSL_INIT_DEBUG
-    fprintf(stderr, "OPENSSL_INIT: ossl_init_base: Setting up stop handlers\n");
+    fprintf(stderr, "OPENSSL_INIT: ossl_init_register_atexit()\n");
 #endif
-    /*
-     * We use a dummy thread local key here. We use the destructor to detect
-     * when the thread is going to stop (where that feature is available)
-     */
-    CRYPTO_THREAD_init_local(&threadstopkey, ossl_init_thread_stop_wrap);
 #ifndef OPENSSL_SYS_UEFI
-    atexit(OPENSSL_cleanup);
+# ifdef _WIN32
+    /* We use _onexit() in preference because it gets called on DLL unload */
+    if (_onexit(win32atexit) == NULL)
+        return 0;
+# else
+    if (atexit(OPENSSL_cleanup) != 0)
+        return 0;
+# endif
 #endif
-    init_lock = CRYPTO_THREAD_lock_new();
-    OPENSSL_cpuid_setup();
-    base_inited = 1;
+
+    return 1;
+}
+
+DEFINE_RUN_ONCE_STATIC_ALT(ossl_init_no_register_atexit,
+                           ossl_init_register_atexit)
+{
+#ifdef OPENSSL_INIT_DEBUG
+    fprintf(stderr, "OPENSSL_INIT: ossl_init_no_register_atexit ok!\n");
+#endif
+    /* Do nothing in this case */
+    return 1;
+}
+
+static CRYPTO_ONCE load_crypto_nodelete = CRYPTO_ONCE_STATIC_INIT;
+DEFINE_RUN_ONCE_STATIC(ossl_init_load_crypto_nodelete)
+{
+    OSSL_TRACE(INIT, "ossl_init_load_crypto_nodelete()\n");
+
+#if !defined(OPENSSL_USE_NODELETE) \
+    && !defined(OPENSSL_NO_PINSHARED)
+# if defined(DSO_WIN32) && !defined(_WIN32_WCE)
+    {
+        HMODULE handle = NULL;
+        BOOL ret;
+
+        /* We don't use the DSO route for WIN32 because there is a better way */
+        ret = GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                                | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                                (void *)&base_inited, &handle);
+
+        OSSL_TRACE1(INIT,
+                    "ossl_init_load_crypto_nodelete: "
+                    "obtained DSO reference? %s\n",
+                    (ret == TRUE ? "No!" : "Yes."));
+        return (ret == TRUE) ? 1 : 0;
+    }
+# elif !defined(DSO_NONE)
+    /*
+     * Deliberately leak a reference to ourselves. This will force the library
+     * to remain loaded until the atexit() handler is run at process exit.
+     */
+    {
+        DSO *dso;
+        void *err;
+
+        if (!err_shelve_state(&err))
+            return 0;
+
+        dso = DSO_dsobyaddr(&base_inited, DSO_FLAG_NO_UNLOAD_ON_FREE);
+        /*
+         * In case of No!, it is uncertain our exit()-handlers can still be
+         * called. After dlclose() the whole library might have been unloaded
+         * already.
+         */
+        OSSL_TRACE1(INIT, "obtained DSO reference? %s\n",
+                    (dso == NULL ? "No!" : "Yes."));
+        DSO_free(dso);
+        err_unshelve_state(err);
+    }
+# endif
+#endif
+
+    return 1;
 }
 
 static CRYPTO_ONCE load_crypto_strings = CRYPTO_ONCE_STATIC_INIT;
 static int load_crypto_strings_inited = 0;
-static void ossl_init_no_load_crypto_strings(void)
+DEFINE_RUN_ONCE_STATIC(ossl_init_load_crypto_strings)
 {
-    /* Do nothing in this case */
-    return;
-}
-
-static void ossl_init_load_crypto_strings(void)
-{
+    int ret = 1;
     /*
      * OPENSSL_NO_AUTOERRINIT is provided here to prevent at compile time
      * pulling in all the error strings during static linking
      */
 #if !defined(OPENSSL_NO_ERR) && !defined(OPENSSL_NO_AUTOERRINIT)
-# ifdef OPENSSL_INIT_DEBUG
-    fprintf(stderr, "OPENSSL_INIT: ossl_init_load_crypto_strings: "
-                    "err_load_crypto_strings_intern()\n");
-# endif
-    err_load_crypto_strings_intern();
-#endif
+    OSSL_TRACE(INIT, "err_load_crypto_strings_int()\n");
+    ret = err_load_crypto_strings_int();
     load_crypto_strings_inited = 1;
+#endif
+    return ret;
+}
+
+DEFINE_RUN_ONCE_STATIC_ALT(ossl_init_no_load_crypto_strings,
+                           ossl_init_load_crypto_strings)
+{
+    /* Do nothing in this case */
+    return 1;
 }
 
 static CRYPTO_ONCE add_all_ciphers = CRYPTO_ONCE_STATIC_INIT;
-static void ossl_init_add_all_ciphers(void)
+DEFINE_RUN_ONCE_STATIC(ossl_init_add_all_ciphers)
 {
     /*
      * OPENSSL_NO_AUTOALGINIT is provided here to prevent at compile time
      * pulling in all the ciphers during static linking
      */
 #ifndef OPENSSL_NO_AUTOALGINIT
-# ifdef OPENSSL_INIT_DEBUG
-    fprintf(stderr, "OPENSSL_INIT: ossl_init_add_all_ciphers: "
-                    "openssl_add_all_ciphers_internal()\n");
-# endif
-    openssl_add_all_ciphers_internal();
-# ifndef OPENSSL_NO_ENGINE
-#  if defined(__OpenBSD__) || defined(__FreeBSD__) || defined(HAVE_CRYPTODEV)
-    ENGINE_setup_bsd_cryptodev();
-#  endif
-# endif
+    OSSL_TRACE(INIT, "openssl_add_all_ciphers_int()\n");
+    openssl_add_all_ciphers_int();
 #endif
+    return 1;
+}
+
+DEFINE_RUN_ONCE_STATIC_ALT(ossl_init_no_add_all_ciphers,
+                           ossl_init_add_all_ciphers)
+{
+    /* Do nothing */
+    return 1;
 }
 
 static CRYPTO_ONCE add_all_digests = CRYPTO_ONCE_STATIC_INIT;
-static void ossl_init_add_all_digests(void)
+DEFINE_RUN_ONCE_STATIC(ossl_init_add_all_digests)
 {
     /*
      * OPENSSL_NO_AUTOALGINIT is provided here to prevent at compile time
      * pulling in all the ciphers during static linking
      */
 #ifndef OPENSSL_NO_AUTOALGINIT
-# ifdef OPENSSL_INIT_DEBUG
-    fprintf(stderr, "OPENSSL_INIT: ossl_init_add_all_digests: "
-                    "openssl_add_all_digests_internal()\n");
-# endif
-    openssl_add_all_digests_internal();
-# ifndef OPENSSL_NO_ENGINE
-#  if defined(__OpenBSD__) || defined(__FreeBSD__) || defined(HAVE_CRYPTODEV)
-    ENGINE_setup_bsd_cryptodev();
-#  endif
-# endif
+    OSSL_TRACE(INIT, "openssl_add_all_digests()\n");
+    openssl_add_all_digests_int();
 #endif
+    return 1;
 }
 
-static void ossl_init_no_add_algs(void)
+DEFINE_RUN_ONCE_STATIC_ALT(ossl_init_no_add_all_digests,
+                           ossl_init_add_all_digests)
 {
     /* Do nothing */
-    return;
+    return 1;
 }
 
 static CRYPTO_ONCE config = CRYPTO_ONCE_STATIC_INIT;
 static int config_inited = 0;
-static const char *config_filename;
-static void ossl_init_config(void)
+static const OPENSSL_INIT_SETTINGS *conf_settings = NULL;
+DEFINE_RUN_ONCE_STATIC(ossl_init_config)
 {
-#ifdef OPENSSL_INIT_DEBUG
-    fprintf(stderr,
-            "OPENSSL_INIT: ossl_init_config: openssl_config_internal(%s)\n",
-            config_filename==NULL?"NULL":config_filename);
-#endif
-    openssl_config_internal(config_filename);
+    int ret = openssl_config_int(conf_settings);
     config_inited = 1;
+    return ret;
 }
-static void ossl_init_no_config(void)
+DEFINE_RUN_ONCE_STATIC_ALT(ossl_init_no_config, ossl_init_config)
 {
-#ifdef OPENSSL_INIT_DEBUG
-    fprintf(stderr,
-            "OPENSSL_INIT: ossl_init_config: openssl_no_config_internal()\n");
-#endif
-    openssl_no_config_internal();
+    OSSL_TRACE(INIT, "openssl_no_config_int()\n");
+    openssl_no_config_int();
     config_inited = 1;
+    return 1;
 }
 
-#ifndef OPENSSL_NO_ASYNC
 static CRYPTO_ONCE async = CRYPTO_ONCE_STATIC_INIT;
 static int async_inited = 0;
-static void ossl_init_async(void)
+DEFINE_RUN_ONCE_STATIC(ossl_init_async)
 {
-#ifdef OPENSSL_INIT_DEBUG
-    fprintf(stderr, "OPENSSL_INIT: ossl_init_async: async_init()\n");
-#endif
-    async_init();
+    OSSL_TRACE(INIT, "async_init()\n");
+    if (!async_init())
+        return 0;
     async_inited = 1;
+    return 1;
 }
-#endif
 
 #ifndef OPENSSL_NO_ENGINE
 static CRYPTO_ONCE engine_openssl = CRYPTO_ONCE_STATIC_INIT;
-static void ossl_init_engine_openssl(void)
+DEFINE_RUN_ONCE_STATIC(ossl_init_engine_openssl)
 {
-# ifdef OPENSSL_INIT_DEBUG
-    fprintf(stderr, "OPENSSL_INIT: ossl_init_engine_openssl: "
-                    "engine_load_openssl_internal()\n");
-# endif
-    engine_load_openssl_internal();
+    OSSL_TRACE(INIT, "engine_load_openssl_int()\n");
+    engine_load_openssl_int();
+    return 1;
 }
-# if !defined(OPENSSL_NO_HW) && \
-    (defined(__OpenBSD__) || defined(__FreeBSD__) || defined(HAVE_CRYPTODEV))
-static CRYPTO_ONCE engine_cryptodev = CRYPTO_ONCE_STATIC_INIT;
-static void ossl_init_engine_cryptodev(void)
-{
-#  ifdef OPENSSL_INIT_DEBUG
-    fprintf(stderr, "OPENSSL_INIT: ossl_init_engine_cryptodev: "
-                    "engine_load_cryptodev_internal()\n");
-#  endif
-    engine_load_cryptodev_internal();
-}
-# endif
-
 # ifndef OPENSSL_NO_RDRAND
 static CRYPTO_ONCE engine_rdrand = CRYPTO_ONCE_STATIC_INIT;
-static void ossl_init_engine_rdrand(void)
+DEFINE_RUN_ONCE_STATIC(ossl_init_engine_rdrand)
 {
-#  ifdef OPENSSL_INIT_DEBUG
-    fprintf(stderr, "OPENSSL_INIT: ossl_init_engine_rdrand: "
-                    "engine_load_rdrand_internal()\n");
-#  endif
-    engine_load_rdrand_internal();
+    OSSL_TRACE(INIT, "engine_load_rdrand_int()\n");
+    engine_load_rdrand_int();
+    return 1;
 }
 # endif
 static CRYPTO_ONCE engine_dynamic = CRYPTO_ONCE_STATIC_INIT;
-static void ossl_init_engine_dynamic(void)
+DEFINE_RUN_ONCE_STATIC(ossl_init_engine_dynamic)
 {
-# ifdef OPENSSL_INIT_DEBUG
-    fprintf(stderr, "OPENSSL_INIT: ossl_init_engine_dynamic: "
-                    "engine_load_dynamic_internal()\n");
-# endif
-    engine_load_dynamic_internal();
+    OSSL_TRACE(INIT, "engine_load_dynamic_int()\n");
+    engine_load_dynamic_int();
+    return 1;
 }
 # ifndef OPENSSL_NO_STATIC_ENGINE
-#  if !defined(OPENSSL_NO_HW) && !defined(OPENSSL_NO_HW_PADLOCK)
-static CRYPTO_ONCE engine_padlock = CRYPTO_ONCE_STATIC_INIT;
-static void ossl_init_engine_padlock(void)
+#  ifndef OPENSSL_NO_DEVCRYPTOENG
+static CRYPTO_ONCE engine_devcrypto = CRYPTO_ONCE_STATIC_INIT;
+DEFINE_RUN_ONCE_STATIC(ossl_init_engine_devcrypto)
 {
-#   ifdef OPENSSL_INIT_DEBUG
-    fprintf(stderr, "OPENSSL_INIT: ossl_init_engine_padlock: "
-                    "engine_load_padlock_internal()\n");
-#   endif
-    engine_load_padlock_internal();
+    OSSL_TRACE(INIT, "engine_load_devcrypto_int()\n");
+    engine_load_devcrypto_int();
+    return 1;
+}
+#  endif
+#  if !defined(OPENSSL_NO_PADLOCKENG)
+static CRYPTO_ONCE engine_padlock = CRYPTO_ONCE_STATIC_INIT;
+DEFINE_RUN_ONCE_STATIC(ossl_init_engine_padlock)
+{
+    OSSL_TRACE(INIT, "engine_load_padlock_int()\n");
+    engine_load_padlock_int();
+    return 1;
 }
 #  endif
 #  if defined(OPENSSL_SYS_WIN32) && !defined(OPENSSL_NO_CAPIENG)
 static CRYPTO_ONCE engine_capi = CRYPTO_ONCE_STATIC_INIT;
-static void ossl_init_engine_capi(void)
+DEFINE_RUN_ONCE_STATIC(ossl_init_engine_capi)
 {
-#   ifdef OPENSSL_INIT_DEBUG
-    fprintf(stderr, "OPENSSL_INIT: ossl_init_engine_capi: "
-                    "engine_load_capi_internal()\n");
-#   endif
-    engine_load_capi_internal();
+    OSSL_TRACE(INIT, "engine_load_capi_int()\n");
+    engine_load_capi_int();
+    return 1;
 }
 #  endif
-static CRYPTO_ONCE engine_dasync = CRYPTO_ONCE_STATIC_INIT;
-static void ossl_init_engine_dasync(void)
-{
-# ifdef OPENSSL_INIT_DEBUG
-    fprintf(stderr, "OPENSSL_INIT: ossl_init_engine_dasync: "
-                    "engine_load_dasync_internal()\n");
-# endif
-    engine_load_dasync_internal();
-}
 #  if !defined(OPENSSL_NO_AFALGENG)
 static CRYPTO_ONCE engine_afalg = CRYPTO_ONCE_STATIC_INIT;
-static void ossl_init_engine_afalg(void)
+DEFINE_RUN_ONCE_STATIC(ossl_init_engine_afalg)
 {
-#   ifdef OPENSSL_INIT_DEBUG
-    fprintf(stderr, "OPENSSL_INIT: ossl_init_engine_afalg: "
-                    "engine_load_afalg_internal()\n");
-#   endif
-    engine_load_afalg_internal();
+    OSSL_TRACE(INIT, "engine_load_afalg_int()\n");
+    engine_load_afalg_int();
+    return 1;
 }
 #  endif
 # endif
@@ -326,75 +325,22 @@ static void ossl_init_engine_afalg(void)
 static CRYPTO_ONCE zlib = CRYPTO_ONCE_STATIC_INIT;
 
 static int zlib_inited = 0;
-static void ossl_init_zlib(void)
+DEFINE_RUN_ONCE_STATIC(ossl_init_zlib)
 {
     /* Do nothing - we need to know about this for the later cleanup */
     zlib_inited = 1;
-}
-#endif
-
-static void ossl_init_thread_stop(struct thread_local_inits_st *locals)
-{
-    /* Can't do much about this */
-    if (locals == NULL)
-        return;
-
-#ifndef OPENSSL_NO_ASYNC
-    if (locals->async) {
-#ifdef OPENSSL_INIT_DEBUG
-        fprintf(stderr, "OPENSSL_INIT: ossl_init_thread_stop: "
-                        "ASYNC_cleanup_thread()\n");
-#endif
-        ASYNC_cleanup_thread();
-    }
-#endif
-
-    if (locals->err_state) {
-#ifdef OPENSSL_INIT_DEBUG
-        fprintf(stderr, "OPENSSL_INIT: ossl_init_thread_stop: "
-                        "ERR_remove_thread_state()\n");
-#endif
-        ERR_remove_thread_state();
-    }
-
-    OPENSSL_free(locals);
-}
-
-void OPENSSL_thread_stop(void)
-{
-    ossl_init_thread_stop(
-        (struct thread_local_inits_st *)ossl_init_get_thread_local(0));
-}
-
-int ossl_init_thread_start(uint64_t opts)
-{
-    struct thread_local_inits_st *locals = ossl_init_get_thread_local(1);
-
-    if (locals == NULL)
-        return 0;
-
-    if (opts & OPENSSL_INIT_THREAD_ASYNC) {
-#ifdef OPENSSL_INIT_DEBUG
-        fprintf(stderr, "OPENSSL_INIT: ossl_init_thread_start: "
-                        "marking thread for async\n");
-#endif
-        locals->async = 1;
-    }
-
-    if (opts & OPENSSL_INIT_THREAD_ERR_STATE) {
-#ifdef OPENSSL_INIT_DEBUG
-        fprintf(stderr, "OPENSSL_INIT: ossl_init_thread_start: "
-                        "marking thread for err_state\n");
-#endif
-        locals->err_state = 1;
-    }
-
     return 1;
 }
+#endif
 
 void OPENSSL_cleanup(void)
 {
     OPENSSL_INIT_STOP *currhandler, *lasthandler;
+
+    /*
+     * TODO(3.0): This function needs looking at with a view to moving most/all
+     * of this into onfree handlers in OPENSSL_CTX.
+     */
 
     /* If we've not been inited then no need to deinit */
     if (!base_inited)
@@ -409,7 +355,7 @@ void OPENSSL_cleanup(void)
      * Thread stop may not get automatically called by the thread library for
      * the very last thread in some situations, so call it directly.
      */
-    ossl_init_thread_stop(ossl_init_get_thread_local(0));
+    OPENSSL_thread_stop();
 
     currhandler = stop_handlers;
     while (currhandler != NULL) {
@@ -421,6 +367,7 @@ void OPENSSL_cleanup(void)
     stop_handlers = NULL;
 
     CRYPTO_THREAD_lock_free(init_lock);
+    init_lock = NULL;
 
     /*
      * We assume we are single-threaded for this function, i.e. no race
@@ -429,72 +376,73 @@ void OPENSSL_cleanup(void)
 
 #ifndef OPENSSL_NO_COMP
     if (zlib_inited) {
-#ifdef OPENSSL_INIT_DEBUG
-        fprintf(stderr, "OPENSSL_INIT: OPENSSL_cleanup: "
-                        "COMP_zlib_cleanup()\n");
-#endif
-        COMP_zlib_cleanup();
+        OSSL_TRACE(INIT, "OPENSSL_cleanup: comp_zlib_cleanup_int()\n");
+        comp_zlib_cleanup_int();
     }
 #endif
 
-#ifndef OPENSSL_NO_ASYNC
     if (async_inited) {
-# ifdef OPENSSL_INIT_DEBUG
-        fprintf(stderr, "OPENSSL_INIT: OPENSSL_cleanup: "
-                        "async_deinit()\n");
-# endif
+        OSSL_TRACE(INIT, "OPENSSL_cleanup: async_deinit()\n");
         async_deinit();
     }
-#endif
 
     if (load_crypto_strings_inited) {
-#ifdef OPENSSL_INIT_DEBUG
-        fprintf(stderr, "OPENSSL_INIT: OPENSSL_cleanup: "
-                        "ERR_free_strings()\n");
-#endif
-        ERR_free_strings();
+        OSSL_TRACE(INIT, "OPENSSL_cleanup: err_free_strings_int()\n");
+        err_free_strings_int();
     }
 
-    CRYPTO_THREAD_cleanup_local(&threadstopkey);
-
-#ifdef OPENSSL_INIT_DEBUG
-    fprintf(stderr, "OPENSSL_INIT: OPENSSL_cleanup: "
-                    "RAND_cleanup()\n");
-    fprintf(stderr, "OPENSSL_INIT: OPENSSL_cleanup: "
-                    "CONF_modules_free()\n");
-#ifndef OPENSSL_NO_ENGINE
-    fprintf(stderr, "OPENSSL_INIT: OPENSSL_cleanup: "
-                    "ENGINE_cleanup()\n");
-#endif
-    fprintf(stderr, "OPENSSL_INIT: OPENSSL_cleanup: "
-                    "CRYPTO_cleanup_all_ex_data()\n");
-    fprintf(stderr, "OPENSSL_INIT: OPENSSL_cleanup: "
-                    "BIO_sock_cleanup()\n");
-    fprintf(stderr, "OPENSSL_INIT: OPENSSL_cleanup: "
-                    "EVP_cleanup()\n");
-    fprintf(stderr, "OPENSSL_INIT: OPENSSL_cleanup: "
-                    "OBJ_cleanup()\n");
-#endif
     /*
      * Note that cleanup order is important:
-     * - RAND_cleanup could call an ENINGE's RAND cleanup function so must be
-     * called before ENGINE_cleanup()
+     * - rand_cleanup_int could call an ENGINE's RAND cleanup function so
+     * must be called before engine_cleanup_int()
      * - ENGINEs use CRYPTO_EX_DATA and therefore, must be cleaned up
-     * before the ex data handlers are wiped in CRYPTO_cleanup_all_ex_data().
-     * - CONF_modules_free() can end up in ENGINE code so must be called before
-     * ENGINE_cleanup()
+     * before the ex data handlers are wiped during default openssl_ctx deinit.
+     * - conf_modules_free_int() can end up in ENGINE code so must be called
+     * before engine_cleanup_int()
+     * - ENGINEs and additional EVP algorithms might use added OIDs names so
+     * obj_cleanup_int() must be called last
      */
-    RAND_cleanup();
-    CONF_modules_free();
+    OSSL_TRACE(INIT, "OPENSSL_cleanup: rand_cleanup_int()\n");
+    rand_cleanup_int();
+
+    OSSL_TRACE(INIT, "OPENSSL_cleanup: conf_modules_free_int()\n");
+    conf_modules_free_int();
+
 #ifndef OPENSSL_NO_ENGINE
-    ENGINE_cleanup();
+    OSSL_TRACE(INIT, "OPENSSL_cleanup: engine_cleanup_int()\n");
+    engine_cleanup_int();
 #endif
-    CRYPTO_cleanup_all_ex_data();
-#ifndef OPENSSL_NO_SOCK
-    BIO_sock_cleanup();
+    OSSL_TRACE(INIT, "OPENSSL_cleanup: ossl_store_cleanup_int()\n");
+    ossl_store_cleanup_int();
+
+    OSSL_TRACE(INIT, "OPENSSL_cleanup: openssl_ctx_default_deinit()\n");
+    openssl_ctx_default_deinit();
+
+    ossl_cleanup_thread();
+
+    OSSL_TRACE(INIT, "OPENSSL_cleanup: bio_cleanup()\n");
+    bio_cleanup();
+
+    OSSL_TRACE(INIT, "OPENSSL_cleanup: evp_cleanup_int()\n");
+    evp_cleanup_int();
+
+    OSSL_TRACE(INIT, "OPENSSL_cleanup: obj_cleanup_int()\n");
+    obj_cleanup_int();
+
+    OSSL_TRACE(INIT, "OPENSSL_cleanup: err_int()\n");
+    err_cleanup();
+
+    OSSL_TRACE(INIT, "OPENSSL_cleanup: CRYPTO_secure_malloc_done()\n");
+    CRYPTO_secure_malloc_done();
+
+#ifndef OPENSSL_NO_CMP
+    OSSL_TRACE(INIT, "OPENSSL_cleanup: OSSL_CMP_log_close()\n");
+    OSSL_CMP_log_close();
 #endif
-    EVP_cleanup();
-    OBJ_cleanup();
+
+    OSSL_TRACE(INIT, "OPENSSL_cleanup: ossl_trace_cleanup()\n");
+    ossl_trace_cleanup();
+
     base_inited = 0;
 }
 
@@ -505,115 +453,138 @@ void OPENSSL_cleanup(void)
  */
 int OPENSSL_init_crypto(uint64_t opts, const OPENSSL_INIT_SETTINGS *settings)
 {
-    static int stoperrset = 0;
+    /*
+     * TODO(3.0): This function needs looking at with a view to moving most/all
+     * of this into OPENSSL_CTX.
+     */
 
     if (stopped) {
-        if (!stoperrset) {
-            /*
-             * We only ever set this once to avoid getting into an infinite
-             * loop where the error system keeps trying to init and fails so
-             * sets an error etc
-             */
-            stoperrset = 1;
+        if (!(opts & OPENSSL_INIT_BASE_ONLY))
             CRYPTOerr(CRYPTO_F_OPENSSL_INIT_CRYPTO, ERR_R_INIT_FAIL);
-        }
         return 0;
     }
 
-    if (!CRYPTO_THREAD_run_once(&base, ossl_init_base))
+    /*
+     * When the caller specifies OPENSSL_INIT_BASE_ONLY, that should be the
+     * *only* option specified.  With that option we return immediately after
+     * doing the requested limited initialization.  Note that
+     * err_shelve_state() called by us via ossl_init_load_crypto_nodelete()
+     * re-enters OPENSSL_init_crypto() with OPENSSL_INIT_BASE_ONLY, but with
+     * base already initialized this is a harmless NOOP.
+     *
+     * If we remain the only caller of err_shelve_state() the recursion should
+     * perhaps be removed, but if in doubt, it can be left in place.
+     */
+    if (!RUN_ONCE(&base, ossl_init_base))
+        return 0;
+
+    if (opts & OPENSSL_INIT_BASE_ONLY)
+        return 1;
+
+    /*
+     * Now we don't always set up exit handlers, the INIT_BASE_ONLY calls
+     * should not have the side-effect of setting up exit handlers, and
+     * therefore, this code block is below the INIT_BASE_ONLY-conditioned early
+     * return above.
+     */
+    if ((opts & OPENSSL_INIT_NO_ATEXIT) != 0) {
+        if (!RUN_ONCE_ALT(&register_atexit, ossl_init_no_register_atexit,
+                          ossl_init_register_atexit))
+            return 0;
+    } else if (!RUN_ONCE(&register_atexit, ossl_init_register_atexit)) {
+        return 0;
+    }
+
+    if (!RUN_ONCE(&load_crypto_nodelete, ossl_init_load_crypto_nodelete))
         return 0;
 
     if ((opts & OPENSSL_INIT_NO_LOAD_CRYPTO_STRINGS)
-            && !CRYPTO_THREAD_run_once(&load_crypto_strings,
-                                       ossl_init_no_load_crypto_strings))
+            && !RUN_ONCE_ALT(&load_crypto_strings,
+                             ossl_init_no_load_crypto_strings,
+                             ossl_init_load_crypto_strings))
         return 0;
 
     if ((opts & OPENSSL_INIT_LOAD_CRYPTO_STRINGS)
-            && !CRYPTO_THREAD_run_once(&load_crypto_strings,
-                                       ossl_init_load_crypto_strings))
+            && !RUN_ONCE(&load_crypto_strings, ossl_init_load_crypto_strings))
         return 0;
 
     if ((opts & OPENSSL_INIT_NO_ADD_ALL_CIPHERS)
-            && !CRYPTO_THREAD_run_once(&add_all_ciphers, ossl_init_no_add_algs))
+            && !RUN_ONCE_ALT(&add_all_ciphers, ossl_init_no_add_all_ciphers,
+                             ossl_init_add_all_ciphers))
         return 0;
 
     if ((opts & OPENSSL_INIT_ADD_ALL_CIPHERS)
-            && !CRYPTO_THREAD_run_once(&add_all_ciphers,
-                                       ossl_init_add_all_ciphers))
+            && !RUN_ONCE(&add_all_ciphers, ossl_init_add_all_ciphers))
         return 0;
 
     if ((opts & OPENSSL_INIT_NO_ADD_ALL_DIGESTS)
-            && !CRYPTO_THREAD_run_once(&add_all_digests, ossl_init_no_add_algs))
+            && !RUN_ONCE_ALT(&add_all_digests, ossl_init_no_add_all_digests,
+                             ossl_init_add_all_digests))
         return 0;
 
     if ((opts & OPENSSL_INIT_ADD_ALL_DIGESTS)
-            && !CRYPTO_THREAD_run_once(&add_all_digests,
-                                       ossl_init_add_all_digests))
+            && !RUN_ONCE(&add_all_digests, ossl_init_add_all_digests))
+        return 0;
+
+    if ((opts & OPENSSL_INIT_ATFORK)
+            && !openssl_init_fork_handlers())
         return 0;
 
     if ((opts & OPENSSL_INIT_NO_LOAD_CONFIG)
-            && !CRYPTO_THREAD_run_once(&config, ossl_init_no_config))
+            && !RUN_ONCE_ALT(&config, ossl_init_no_config, ossl_init_config))
         return 0;
 
     if (opts & OPENSSL_INIT_LOAD_CONFIG) {
         int ret;
         CRYPTO_THREAD_write_lock(init_lock);
-        config_filename = (settings == NULL) ? NULL : settings->config_name;
-        ret = CRYPTO_THREAD_run_once(&config, ossl_init_config);
+        conf_settings = settings;
+        ret = RUN_ONCE(&config, ossl_init_config);
+        conf_settings = NULL;
         CRYPTO_THREAD_unlock(init_lock);
-        if (!ret)
+        if (ret <= 0)
             return 0;
     }
 
-#ifndef OPENSSL_NO_ASYNC
     if ((opts & OPENSSL_INIT_ASYNC)
-            && !CRYPTO_THREAD_run_once(&async, ossl_init_async))
+            && !RUN_ONCE(&async, ossl_init_async))
         return 0;
-#endif
+
 #ifndef OPENSSL_NO_ENGINE
     if ((opts & OPENSSL_INIT_ENGINE_OPENSSL)
-            && !CRYPTO_THREAD_run_once(&engine_openssl,
-                                       ossl_init_engine_openssl))
+            && !RUN_ONCE(&engine_openssl, ossl_init_engine_openssl))
         return 0;
-# if !defined(OPENSSL_NO_HW) && \
-    (defined(__OpenBSD__) || defined(__FreeBSD__) || defined(HAVE_CRYPTODEV))
-    if ((opts & OPENSSL_INIT_ENGINE_CRYPTODEV)
-            && !CRYPTO_THREAD_run_once(&engine_cryptodev,
-                                       ossl_init_engine_cryptodev))
-        return 0;
-# endif
 # ifndef OPENSSL_NO_RDRAND
     if ((opts & OPENSSL_INIT_ENGINE_RDRAND)
-            && !CRYPTO_THREAD_run_once(&engine_rdrand, ossl_init_engine_rdrand))
+            && !RUN_ONCE(&engine_rdrand, ossl_init_engine_rdrand))
         return 0;
 # endif
     if ((opts & OPENSSL_INIT_ENGINE_DYNAMIC)
-            && !CRYPTO_THREAD_run_once(&engine_dynamic,
-                                       ossl_init_engine_dynamic))
+            && !RUN_ONCE(&engine_dynamic, ossl_init_engine_dynamic))
         return 0;
 # ifndef OPENSSL_NO_STATIC_ENGINE
-#  if !defined(OPENSSL_NO_HW) && !defined(OPENSSL_NO_HW_PADLOCK)
+#  ifndef OPENSSL_NO_DEVCRYPTOENG
+    if ((opts & OPENSSL_INIT_ENGINE_CRYPTODEV)
+            && !RUN_ONCE(&engine_devcrypto, ossl_init_engine_devcrypto))
+        return 0;
+#  endif
+#  if !defined(OPENSSL_NO_PADLOCKENG)
     if ((opts & OPENSSL_INIT_ENGINE_PADLOCK)
-            && !CRYPTO_THREAD_run_once(&engine_padlock,
-                                       ossl_init_engine_padlock))
+            && !RUN_ONCE(&engine_padlock, ossl_init_engine_padlock))
         return 0;
 #  endif
 #  if defined(OPENSSL_SYS_WIN32) && !defined(OPENSSL_NO_CAPIENG)
     if ((opts & OPENSSL_INIT_ENGINE_CAPI)
-            && !CRYPTO_THREAD_run_once(&engine_capi, ossl_init_engine_capi))
+            && !RUN_ONCE(&engine_capi, ossl_init_engine_capi))
         return 0;
 #  endif
-    if ((opts & OPENSSL_INIT_ENGINE_DASYNC)
-            && !CRYPTO_THREAD_run_once(&engine_dasync, ossl_init_engine_dasync))
-        return 0;
 #  if !defined(OPENSSL_NO_AFALGENG)
     if ((opts & OPENSSL_INIT_ENGINE_AFALG)
-            && !CRYPTO_THREAD_run_once(&engine_afalg, ossl_init_engine_afalg))
+            && !RUN_ONCE(&engine_afalg, ossl_init_engine_afalg))
         return 0;
 #  endif
 # endif
     if (opts & (OPENSSL_INIT_ENGINE_ALL_BUILTIN
-                | OPENSSL_INIT_ENGINE_DASYNC | OPENSSL_INIT_ENGINE_OPENSSL
+                | OPENSSL_INIT_ENGINE_OPENSSL
                 | OPENSSL_INIT_ENGINE_AFALG)) {
         ENGINE_register_all_complete();
     }
@@ -621,7 +592,7 @@ int OPENSSL_init_crypto(uint64_t opts, const OPENSSL_INIT_SETTINGS *settings)
 
 #ifndef OPENSSL_NO_COMP
     if ((opts & OPENSSL_INIT_ZLIB)
-            && !CRYPTO_THREAD_run_once(&zlib, ossl_init_zlib))
+            && !RUN_ONCE(&zlib, ossl_init_zlib))
         return 0;
 #endif
 
@@ -632,9 +603,58 @@ int OPENSSL_atexit(void (*handler)(void))
 {
     OPENSSL_INIT_STOP *newhand;
 
-    newhand = OPENSSL_malloc(sizeof(*newhand));
-    if (newhand == NULL)
+#if !defined(OPENSSL_USE_NODELETE)\
+    && !defined(OPENSSL_NO_PINSHARED)
+    {
+        union {
+            void *sym;
+            void (*func)(void);
+        } handlersym;
+
+        handlersym.func = handler;
+# if defined(DSO_WIN32) && !defined(_WIN32_WCE)
+        {
+            HMODULE handle = NULL;
+            BOOL ret;
+
+            /*
+             * We don't use the DSO route for WIN32 because there is a better
+             * way
+             */
+            ret = GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                                    | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                                    handlersym.sym, &handle);
+
+            if (!ret)
+                return 0;
+        }
+# elif !defined(DSO_NONE)
+        /*
+         * Deliberately leak a reference to the handler. This will force the
+         * library/code containing the handler to remain loaded until we run the
+         * atexit handler. If -znodelete has been used then this is
+         * unnecessary.
+         */
+        {
+            DSO *dso = NULL;
+
+            ERR_set_mark();
+            dso = DSO_dsobyaddr(handlersym.sym, DSO_FLAG_NO_UNLOAD_ON_FREE);
+            /* See same code above in ossl_init_base() for an explanation. */
+            OSSL_TRACE1(INIT,
+                       "atexit: obtained DSO reference? %s\n",
+                       (dso == NULL ? "No!" : "Yes."));
+            DSO_free(dso);
+            ERR_pop_to_mark();
+        }
+# endif
+    }
+#endif
+
+    if ((newhand = OPENSSL_malloc(sizeof(*newhand))) == NULL) {
+        CRYPTOerr(CRYPTO_F_OPENSSL_ATEXIT, ERR_R_MALLOC_FAILURE);
         return 0;
+    }
 
     newhand->handler = handler;
     newhand->next = stop_handlers;
@@ -642,3 +662,29 @@ int OPENSSL_atexit(void (*handler)(void))
 
     return 1;
 }
+
+#ifdef OPENSSL_SYS_UNIX
+/*
+ * The following three functions are for OpenSSL developers.  This is
+ * where we set/reset state across fork (called via pthread_atfork when
+ * it exists, or manually by the application when it doesn't).
+ *
+ * WARNING!  If you put code in either OPENSSL_fork_parent or
+ * OPENSSL_fork_child, you MUST MAKE SURE that they are async-signal-
+ * safe.  See this link, for example:
+ *      http://man7.org/linux/man-pages/man7/signal-safety.7.html
+ */
+
+void OPENSSL_fork_prepare(void)
+{
+}
+
+void OPENSSL_fork_parent(void)
+{
+}
+
+void OPENSSL_fork_child(void)
+{
+    /* TODO(3.0): Inform all providers about a fork event */
+}
+#endif

@@ -1,59 +1,10 @@
 /*
- * Written by Rob Stradling (rob@comodo.com) and Stephen Henson
- * (steve@openssl.org) for the OpenSSL project 2014.
- */
-/* ====================================================================
- * Copyright (c) 2014 The OpenSSL Project.  All rights reserved.
+ * Copyright 2016-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 #ifdef OPENSSL_NO_CT
@@ -67,14 +18,26 @@
 #include <openssl/obj_mac.h>
 #include <openssl/x509.h>
 
-#include "ct_locl.h"
+#include "ct_local.h"
 
-SCT_CTX *SCT_CTX_new(void)
+SCT_CTX *SCT_CTX_new(OPENSSL_CTX *libctx, const char *propq)
 {
     SCT_CTX *sctx = OPENSSL_zalloc(sizeof(*sctx));
 
-    if (sctx == NULL)
+    if (sctx == NULL) {
         CTerr(CT_F_SCT_CTX_NEW, ERR_R_MALLOC_FAILURE);
+        return NULL;
+    }
+
+    sctx->libctx = libctx;
+    if (propq != NULL) {
+        sctx->propq = OPENSSL_strdup(propq);
+        if (sctx->propq == NULL) {
+            CTerr(CT_F_SCT_CTX_NEW, ERR_R_MALLOC_FAILURE);
+            OPENSSL_free(sctx);
+            return NULL;
+        }
+    }
 
     return sctx;
 }
@@ -88,6 +51,7 @@ void SCT_CTX_free(SCT_CTX *sctx)
     OPENSSL_free(sctx->ihash);
     OPENSSL_free(sctx->certder);
     OPENSSL_free(sctx->preder);
+    OPENSSL_free(sctx->propq);
     OPENSSL_free(sctx);
 }
 
@@ -240,13 +204,17 @@ err:
     return 0;
 }
 
-__owur static int ct_public_key_hash(X509_PUBKEY *pkey, unsigned char **hash,
-                                     size_t *hash_len)
+__owur static int ct_public_key_hash(SCT_CTX *sctx, X509_PUBKEY *pkey,
+                                     unsigned char **hash, size_t *hash_len)
 {
     int ret = 0;
     unsigned char *md = NULL, *der = NULL;
     int der_len;
     unsigned int md_len;
+    EVP_MD *sha256 = EVP_MD_fetch(sctx->libctx, "SHA2-256", sctx->propq);
+
+    if (sha256 == NULL)
+        goto err;
 
     /* Reuse buffer if possible */
     if (*hash != NULL && *hash_len >= SHA256_DIGEST_LENGTH) {
@@ -262,7 +230,7 @@ __owur static int ct_public_key_hash(X509_PUBKEY *pkey, unsigned char **hash,
     if (der_len <= 0)
         goto err;
 
-    if (!EVP_Digest(der, der_len, md, &md_len, EVP_sha256(), NULL))
+    if (!EVP_Digest(der, der_len, md, &md_len, sha256, NULL))
         goto err;
 
     if (md != *hash) {
@@ -274,6 +242,7 @@ __owur static int ct_public_key_hash(X509_PUBKEY *pkey, unsigned char **hash,
     md = NULL;
     ret = 1;
  err:
+    EVP_MD_free(sha256);
     OPENSSL_free(md);
     OPENSSL_free(der);
     return ret;
@@ -286,7 +255,7 @@ int SCT_CTX_set1_issuer(SCT_CTX *sctx, const X509 *issuer)
 
 int SCT_CTX_set1_issuer_pubkey(SCT_CTX *sctx, X509_PUBKEY *pubkey)
 {
-    return ct_public_key_hash(pubkey, &sctx->ihash, &sctx->ihashlen);
+    return ct_public_key_hash(sctx, pubkey, &sctx->ihash, &sctx->ihashlen);
 }
 
 int SCT_CTX_set1_pubkey(SCT_CTX *sctx, X509_PUBKEY *pubkey)
@@ -296,7 +265,7 @@ int SCT_CTX_set1_pubkey(SCT_CTX *sctx, X509_PUBKEY *pubkey)
     if (pkey == NULL)
         return 0;
 
-    if (!ct_public_key_hash(pubkey, &sctx->pkeyhash, &sctx->pkeyhashlen)) {
+    if (!ct_public_key_hash(sctx, pubkey, &sctx->pkeyhash, &sctx->pkeyhashlen)) {
         EVP_PKEY_free(pkey);
         return 0;
     }
@@ -304,4 +273,9 @@ int SCT_CTX_set1_pubkey(SCT_CTX *sctx, X509_PUBKEY *pubkey)
     EVP_PKEY_free(sctx->pkey);
     sctx->pkey = pkey;
     return 1;
+}
+
+void SCT_CTX_set_time(SCT_CTX *sctx, uint64_t time_in_ms)
+{
+    sctx->epoch_time_in_ms = time_in_ms;
 }

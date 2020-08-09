@@ -1,14 +1,29 @@
 #! /bin/bash
 #
+# Copyright 2016-2020 The OpenSSL Project Authors. All Rights Reserved.
 # Copyright (c) 2016 Viktor Dukhovni <openssl-users@dukhovni.org>.
 # All rights reserved.
 #
-# Contributed to the OpenSSL project under the terms of the OpenSSL license
-# included with the version of the OpenSSL software that includes this module.
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+
+# This file is dual-licensed and is also available under other terms.
+# Please contact the author.
 
 # 100 years should be enough for now
-#
-DAYS=36525
+if [ -z "$DAYS" ]; then
+    DAYS=36525
+fi
+
+if [ -z "$OPENSSL_SIGALG" ]; then
+    OPENSSL_SIGALG=sha256
+fi
+
+if [ -z "$REQMASK" ]; then
+    REQMASK=utf8only
+fi
 
 stderr_onerror() {
     (
@@ -38,6 +53,9 @@ key() {
         rsa) args=("${args[@]}" -pkeyopt rsa_keygen_bits:$bits );;
         ec)  args=("${args[@]}" -pkeyopt "ec_paramgen_curve:$bits")
                args=("${args[@]}" -pkeyopt ec_param_enc:named_curve);;
+        dsa)  args=(-paramfile "$bits");;
+        ed25519)  ;;
+        ed448)  ;;
         *) printf "Unsupported key algorithm: %s\n" "$alg" >&2; return 1;;
         esac
         stderr_onerror \
@@ -45,17 +63,18 @@ key() {
     fi
 }
 
+# Usage: $0 req keyname dn1 dn2 ...
 req() {
     local key=$1; shift
-    local cn=$1; shift
 
     key "$key"
     local errs
 
     stderr_onerror \
-        openssl req -new -sha256 -key "${key}.pem" \
-            -config <(printf "[req]\n%s\n%s\n[dn]\nCN=%s\n" \
-		      "prompt = no" "distinguished_name = dn" "${cn}")
+        openssl req -new -"${OPENSSL_SIGALG}" -key "${key}.pem" \
+            -config <(printf "string_mask=%s\n[req]\n%s\n%s\n[dn]\n" \
+              "$REQMASK" "prompt = no" "distinguished_name = dn"
+                      for dn in "$@"; do echo "$dn"; done)
 }
 
 req_nocn() {
@@ -63,7 +82,7 @@ req_nocn() {
 
     key "$key"
     stderr_onerror \
-        openssl req -new -sha256 -subj / -key "${key}.pem" \
+        openssl req -new -"${OPENSSL_SIGALG}" -subj / -key "${key}.pem" \
             -config <(printf "[req]\n%s\n[dn]\nCN_default =\n" \
 		      "distinguished_name = dn")
 }
@@ -73,7 +92,7 @@ cert() {
     local exts=$1; shift
 
     stderr_onerror \
-        openssl x509 -req -sha256 -out "${cert}.pem" \
+        openssl x509 -req -"${OPENSSL_SIGALG}" -out "${cert}.pem" \
             -extfile <(printf "%s\n" "$exts") "$@"
 }
 
@@ -84,12 +103,12 @@ genroot() {
     local skid="subjectKeyIdentifier = hash"
     local akid="authorityKeyIdentifier = keyid"
 
-    exts=$(printf "%s\n%s\n%s\n" "$skid" "$akid" "basicConstraints = CA:true")
+    exts=$(printf "%s\n%s\n%s\n" "$skid" "$akid" "basicConstraints = critical,CA:true")
     for eku in "$@"
     do
         exts=$(printf "%s\nextendedKeyUsage = %s\n" "$exts" "$eku")
     done
-    csr=$(req "$key" "$cn") || return 1
+    csr=$(req "$key" "CN = $cn") || return 1
     echo "$csr" |
        cert "$cert" "$exts" -signkey "${key}.pem" -set_serial 1 -days "${DAYS}"
 }
@@ -103,15 +122,83 @@ genca() {
     local skid="subjectKeyIdentifier = hash"
     local akid="authorityKeyIdentifier = keyid"
 
-    exts=$(printf "%s\n%s\n%s\n" "$skid" "$akid" "basicConstraints = CA:true")
+    exts=$(printf "%s\n%s\n%s\n" "$skid" "$akid" "basicConstraints = critical,CA:true")
     for eku in "$@"
     do
         exts=$(printf "%s\nextendedKeyUsage = %s\n" "$exts" "$eku")
     done
-    csr=$(req "$key" "$cn") || return 1
+    if [ -n "$NC" ]; then
+        exts=$(printf "%s\nnameConstraints = %s\n" "$exts" "$NC")
+    fi
+    csr=$(req "$key" "CN = $cn") || return 1
     echo "$csr" |
         cert "$cert" "$exts" -CA "${cacert}.pem" -CAkey "${cakey}.pem" \
 	    -set_serial 2 -days "${DAYS}"
+}
+
+gen_nonbc_ca() {
+    local cn=$1; shift
+    local key=$1; shift
+    local cert=$1; shift
+    local cakey=$1; shift
+    local cacert=$1; shift
+    local skid="subjectKeyIdentifier = hash"
+    local akid="authorityKeyIdentifier = keyid"
+
+    exts=$(printf "%s\n%s\n%s\n" "$skid" "$akid")
+    exts=$(printf "%s\nkeyUsage = %s\n" "$exts" "keyCertSign, cRLSign")
+    for eku in "$@"
+    do
+        exts=$(printf "%s\nextendedKeyUsage = %s\n" "$exts" "$eku")
+    done
+    csr=$(req "$key" "CN = $cn") || return 1
+    echo "$csr" |
+        cert "$cert" "$exts" -CA "${cacert}.pem" -CAkey "${cakey}.pem" \
+	    -set_serial 2 -days "${DAYS}"
+}
+
+# Usage: $0 genpc keyname certname eekeyname eecertname pcext1 pcext2 ...
+#
+# Note: takes csr on stdin, so must be used with $0 req like this:
+#
+# $0 req keyname dn | $0 genpc keyname certname eekeyname eecertname pcext ...
+genpc() {
+    local key=$1; shift
+    local cert=$1; shift
+    local cakey=$1; shift
+    local ca=$1; shift
+
+    exts=$(printf "%s\n%s\n%s\n%s\n" \
+	    "subjectKeyIdentifier = hash" \
+	    "authorityKeyIdentifier = keyid, issuer:always" \
+	    "basicConstraints = CA:false" \
+	    "proxyCertInfo = critical, @pcexts";
+           echo "[pcexts]";
+           for x in "$@"; do echo $x; done)
+    cert "$cert" "$exts" -CA "${ca}.pem" -CAkey "${cakey}.pem" \
+	 -set_serial 2 -days "${DAYS}"
+}
+
+# Usage: $0 geneealt keyname certname eekeyname eecertname alt1 alt2 ...
+#
+# Note: takes csr on stdin, so must be used with $0 req like this:
+#
+# $0 req keyname dn | $0 geneealt keyname certname eekeyname eecertname alt ...
+geneealt() {
+    local key=$1; shift
+    local cert=$1; shift
+    local cakey=$1; shift
+    local ca=$1; shift
+
+    exts=$(printf "%s\n%s\n%s\n%s\n" \
+	    "subjectKeyIdentifier = hash" \
+	    "authorityKeyIdentifier = keyid" \
+	    "basicConstraints = CA:false" \
+	    "subjectAltName = @alts";
+           echo "[alts]";
+           for x in "$@"; do echo $x; done)
+    cert "$cert" "$exts" -CA "${ca}.pem" -CAkey "${cakey}.pem" \
+	 -set_serial 2 -days "${DAYS}"
 }
 
 genee() {
@@ -140,8 +227,37 @@ genee() {
 	    "basicConstraints = CA:false" \
 	    "extendedKeyUsage = $purpose" \
 	    "subjectAltName = @alts" "DNS=${cn}")
-    csr=$(req "$key" "$cn") || return 1
+    csr=$(req "$key" "CN = $cn") || return 1
     echo "$csr" |
+	cert "$cert" "$exts" -CA "${ca}.pem" -CAkey "${cakey}.pem" \
+	    -set_serial 2 -days "${DAYS}" "$@"
+}
+
+geneenocsr() {
+    local OPTIND=1
+    local purpose=serverAuth
+
+    while getopts p: o
+    do
+        case $o in
+        p) purpose="$OPTARG";;
+        *) echo "Usage: $0 genee [-p EKU] cn certname cakeyname cacertname" >&2
+           return 1;;
+        esac
+    done
+
+    shift $((OPTIND - 1))
+    local cn=$1; shift
+    local cert=$1; shift
+    local cakey=$1; shift
+    local ca=$1; shift
+
+    exts=$(printf "%s\n%s\n%s\n%s\n%s\n[alts]\n%s\n" \
+	    "subjectKeyIdentifier = hash" \
+	    "authorityKeyIdentifier = keyid, issuer" \
+	    "basicConstraints = CA:false" \
+	    "extendedKeyUsage = $purpose" \
+	    "subjectAltName = @alts" "DNS=${cn}")
 	cert "$cert" "$exts" -CA "${ca}.pem" -CAkey "${cakey}.pem" \
 	    -set_serial 2 -days "${DAYS}" "$@"
 }
@@ -157,7 +273,7 @@ genss() {
 	    "basicConstraints = CA:false" \
 	    "extendedKeyUsage = serverAuth" \
 	    "subjectAltName = @alts" "DNS=${cn}")
-    csr=$(req "$key" "$cn") || return 1
+    csr=$(req "$key" "CN = $cn") || return 1
     echo "$csr" |
         cert "$cert" "$exts" -signkey "${key}.pem" \
             -set_serial 1 -days "${DAYS}" "$@"
@@ -170,6 +286,58 @@ gennocn() {
     csr=$(req_nocn "$key") || return 1
     echo "$csr" |
 	cert "$cert" "" -signkey "${key}.pem" -set_serial 1 -days -1 "$@"
+}
+
+genct() {
+    local OPTIND=1
+    local purpose=serverAuth
+
+    while getopts p: o
+    do
+        case $o in
+        p) purpose="$OPTARG";;
+        *) echo "Usage: $0 genct [-p EKU] cn keyname certname cakeyname cacertname ctlogkey" >&2
+           return 1;;
+        esac
+    done
+
+    shift $((OPTIND - 1))
+    local cn=$1; shift
+    local key=$1; shift
+    local cert=$1; shift
+    local cakey=$1; shift
+    local ca=$1; shift
+    local logkey=$1; shift
+
+    exts=$(printf "%s\n%s\n%s\n%s\n%s\n%s\n[alts]\n%s\n" \
+	    "subjectKeyIdentifier = hash" \
+	    "authorityKeyIdentifier = keyid, issuer" \
+	    "basicConstraints = CA:false" \
+	    "extendedKeyUsage = $purpose" \
+            "1.3.6.1.4.1.11129.2.4.3 = critical,ASN1:NULL"\
+	    "subjectAltName = @alts" "DNS=${cn}")
+    csr=$(req "$key" "CN = $cn") || return 1
+    echo "$csr" |
+	cert "$cert" "$exts" -CA "${ca}.pem" -CAkey "${cakey}.pem" \
+	    -set_serial 2 -days "${DAYS}" "$@"
+    cat ${cert}.pem ${ca}.pem > ${cert}-chain.pem
+    go run github.com/google/certificate-transparency-go/ctutil/sctgen \
+       --log_private_key ${logkey}.pem \
+       --timestamp="2020-01-01T00:00:00Z" \
+       --cert_chain ${cert}-chain.pem \
+       --tls_out ${cert}.tlssct
+    rm ${cert}-chain.pem
+    filesize=$(wc -c <${cert}.tlssct)
+    exts=$(printf "%s\n%s\n%s\n%s\n%s%04X%04X%s\n%s\n[alts]\n%s\n" \
+	    "subjectKeyIdentifier = hash" \
+	    "authorityKeyIdentifier = keyid, issuer" \
+	    "basicConstraints = CA:false" \
+	    "extendedKeyUsage = $purpose" \
+	    "1.3.6.1.4.1.11129.2.4.2 = ASN1:FORMAT:HEX,OCT:" $((filesize+2)) $filesize `xxd -p ${cert}.tlssct | tr -d '\n'` \
+	    "subjectAltName = @alts" "DNS=${cn}")
+    echo "$csr" |
+	cert "$cert" "$exts" -CA "${ca}.pem" -CAkey "${cakey}.pem" \
+	    -set_serial 2 -days "${DAYS}" "$@"
 }
 
 "$@"

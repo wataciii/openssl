@@ -1,70 +1,22 @@
 /*
- * Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL project
- * 1999. Based on an original idea by Massimiliano Pala (madwolf@openca.org).
+ * Copyright 1999-2020 The OpenSSL Project Authors. All Rights Reserved.
+ *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
-/* ====================================================================
- * Copyright (c) 1999 The OpenSSL Project.  All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
- */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include "apps.h"
+#include "progs.h"
 #include <openssl/bio.h>
 #include <openssl/conf.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
-#include <openssl/lhash.h>
 #include <openssl/x509.h>
 #include <openssl/pem.h>
 
@@ -72,24 +24,34 @@ typedef enum OPTION_choice {
     OPT_ERR = -1, OPT_EOF = 0, OPT_HELP,
     OPT_NOOUT, OPT_PUBKEY, OPT_VERIFY, OPT_IN, OPT_OUT,
     OPT_ENGINE, OPT_KEY, OPT_CHALLENGE, OPT_PASSIN, OPT_SPKAC,
-    OPT_SPKSECT
+    OPT_SPKSECT, OPT_KEYFORM,
+    OPT_PROV_ENUM
 } OPTION_CHOICE;
 
-OPTIONS spkac_options[] = {
+const OPTIONS spkac_options[] = {
+    OPT_SECTION("General"),
     {"help", OPT_HELP, '-', "Display this summary"},
-    {"in", OPT_IN, '<', "Input file"},
-    {"out", OPT_OUT, '>', "Output file"},
-    {"key", OPT_KEY, '<', "Create SPKAC using private key"},
-    {"passin", OPT_PASSIN, 's', "Input file pass phrase source"},
-    {"challenge", OPT_CHALLENGE, 's', "Challenge string"},
-    {"spkac", OPT_SPKAC, 's', "Alternative SPKAC name"},
-    {"noout", OPT_NOOUT, '-', "Don't print SPKAC"},
-    {"pubkey", OPT_PUBKEY, '-', "Output public key"},
-    {"verify", OPT_VERIFY, '-', "Verify SPKAC signature"},
-    {"spksect", OPT_SPKSECT, 's'},
+    {"spksect", OPT_SPKSECT, 's',
+     "Specify the name of an SPKAC-dedicated section of configuration"},
 #ifndef OPENSSL_NO_ENGINE
     {"engine", OPT_ENGINE, 's', "Use engine, possibly a hardware device"},
 #endif
+
+    OPT_SECTION("Input"),
+    {"in", OPT_IN, '<', "Input file"},
+    {"key", OPT_KEY, '<', "Create SPKAC using private key"},
+    {"keyform", OPT_KEYFORM, 'f', "Private key file format (ENGINE, other values ignored)"},
+    {"passin", OPT_PASSIN, 's', "Input file pass phrase source"},
+    {"challenge", OPT_CHALLENGE, 's', "Challenge string"},
+    {"spkac", OPT_SPKAC, 's', "Alternative SPKAC name"},
+
+    OPT_SECTION("Output"),
+    {"out", OPT_OUT, '>', "Output file"},
+    {"noout", OPT_NOOUT, '-', "Don't print SPKAC"},
+    {"pubkey", OPT_PUBKEY, '-', "Output public key"},
+    {"verify", OPT_VERIFY, '-', "Verify SPKAC signature"},
+
+    OPT_PROV_OPTIONS,
     {NULL}
 };
 
@@ -105,6 +67,7 @@ int spkac_main(int argc, char **argv)
     char *spkstr = NULL, *prog;
     const char *spkac = "SPKAC", *spksect = "default";
     int i, ret = 1, verify = 0, noout = 0, pubkey = 0;
+    int keyformat = FORMAT_PEM;
     OPTION_CHOICE o;
 
     prog = opt_init(argc, argv, spkac_options);
@@ -140,6 +103,10 @@ int spkac_main(int argc, char **argv)
         case OPT_KEY:
             keyfile = opt_arg();
             break;
+        case OPT_KEYFORM:
+            if (!opt_format(opt_arg(), OPT_FMT_ANY, &keyformat))
+                goto opthelp;
+            break;
         case OPT_CHALLENGE:
             challenge = opt_arg();
             break;
@@ -152,6 +119,10 @@ int spkac_main(int argc, char **argv)
         case OPT_ENGINE:
             e = setup_engine(opt_arg(), 0);
             break;
+        case OPT_PROV_CASES:
+            if (!opt_provider(o))
+                goto end;
+            break;
         }
     }
     argc = opt_num_rest();
@@ -163,23 +134,35 @@ int spkac_main(int argc, char **argv)
         goto end;
     }
 
-    if (keyfile) {
+    if (keyfile != NULL) {
         pkey = load_key(strcmp(keyfile, "-") ? keyfile : NULL,
-                        FORMAT_PEM, 1, passin, e, "private key");
-        if (!pkey) {
+                        keyformat, 1, passin, e, "private key");
+        if (pkey == NULL)
             goto end;
-        }
         spki = NETSCAPE_SPKI_new();
-        if (challenge)
+        if (spki == NULL)
+            goto end;
+        if (challenge != NULL)
             ASN1_STRING_set(spki->spkac->challenge,
                             challenge, (int)strlen(challenge));
-        NETSCAPE_SPKI_set_pubkey(spki, pkey);
-        NETSCAPE_SPKI_sign(spki, pkey, EVP_md5());
+        if (!NETSCAPE_SPKI_set_pubkey(spki, pkey)) {
+            BIO_printf(bio_err, "Error setting public key\n");
+            goto end;
+        }
+        i = NETSCAPE_SPKI_sign(spki, pkey, EVP_md5());
+        if (i <= 0) {
+            BIO_printf(bio_err, "Error signing SPKAC\n");
+            goto end;
+        }
         spkstr = NETSCAPE_SPKI_b64_encode(spki);
+        if (spkstr == NULL)
+            goto end;
 
         out = bio_open_default(outfile, 'w', FORMAT_TEXT);
-        if (out == NULL)
+        if (out == NULL) {
+            OPENSSL_free(spkstr);
             goto end;
+        }
         BIO_printf(out, "SPKAC=%s\n", spkstr);
         OPENSSL_free(spkstr);
         ret = 0;
@@ -199,7 +182,7 @@ int spkac_main(int argc, char **argv)
 
     spki = NETSCAPE_SPKI_b64_decode(spkstr, -1);
 
-    if (!spki) {
+    if (spki == NULL) {
         BIO_printf(bio_err, "Error loading SPKAC\n");
         ERR_print_errors(bio_err);
         goto end;
@@ -214,9 +197,9 @@ int spkac_main(int argc, char **argv)
     pkey = NETSCAPE_SPKI_get_pubkey(spki);
     if (verify) {
         i = NETSCAPE_SPKI_verify(spki, pkey);
-        if (i > 0)
+        if (i > 0) {
             BIO_printf(bio_err, "Signature OK\n");
-        else {
+        } else {
             BIO_printf(bio_err, "Signature Failure\n");
             ERR_print_errors(bio_err);
             goto end;
@@ -232,6 +215,7 @@ int spkac_main(int argc, char **argv)
     NETSCAPE_SPKI_free(spki);
     BIO_free_all(out);
     EVP_PKEY_free(pkey);
+    release_engine(e);
     OPENSSL_free(passin);
-    return (ret);
+    return ret;
 }

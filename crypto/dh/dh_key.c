@@ -1,91 +1,119 @@
-/* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
- * All rights reserved.
+/*
+ * Copyright 1995-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * This package is an SSL implementation written
- * by Eric Young (eay@cryptsoft.com).
- * The implementation was written so as to conform with Netscapes SSL.
- *
- * This library is free for commercial and non-commercial use as long as
- * the following conditions are aheared to.  The following conditions
- * apply to all code found in this distribution, be it the RC4, RSA,
- * lhash, DES, etc., code; not just the SSL code.  The SSL documentation
- * included with this distribution is covered by the same copyright terms
- * except that the holder is Tim Hudson (tjh@cryptsoft.com).
- *
- * Copyright remains Eric Young's, and as such any Copyright notices in
- * the code are not to be removed.
- * If this package is used in a product, Eric Young should be given attribution
- * as the author of the parts of the library used.
- * This can be in the form of a textual message at program startup or
- * in documentation (online or textual) provided with the package.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. All advertising materials mentioning features or use of this software
- *    must display the following acknowledgement:
- *    "This product includes cryptographic software written by
- *     Eric Young (eay@cryptsoft.com)"
- *    The word 'cryptographic' can be left out if the rouines from the library
- *    being used are not cryptographic related :-).
- * 4. If you include any Windows specific code (or a derivative thereof) from
- *    the apps directory (application code) you must include an acknowledgement:
- *    "This product includes software written by Tim Hudson (tjh@cryptsoft.com)"
- *
- * THIS SOFTWARE IS PROVIDED BY ERIC YOUNG ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- *
- * The licence and distribution terms for any publically available version or
- * derivative of this code cannot be changed.  i.e. this code cannot simply be
- * copied and put under another distribution licence
- * [including the GNU Public Licence.]
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
+
+/*
+ * DH low level APIs are deprecated for public use, but still ok for
+ * internal use.
+ */
+#include "internal/deprecated.h"
 
 #include <stdio.h>
 #include "internal/cryptlib.h"
-#include <openssl/rand.h>
-#include <openssl/dh.h>
-#include "internal/bn_int.h"
+#include "dh_local.h"
+#include "crypto/bn.h"
+#include "crypto/dh.h"
+#include "crypto/security_bits.h"
+
+#ifdef FIPS_MODULE
+# define MIN_STRENGTH 112
+#else
+# define MIN_STRENGTH 80
+#endif
 
 static int generate_key(DH *dh);
-static int compute_key(unsigned char *key, const BIGNUM *pub_key, DH *dh);
 static int dh_bn_mod_exp(const DH *dh, BIGNUM *r,
                          const BIGNUM *a, const BIGNUM *p,
                          const BIGNUM *m, BN_CTX *ctx, BN_MONT_CTX *m_ctx);
 static int dh_init(DH *dh);
 static int dh_finish(DH *dh);
 
-int DH_generate_key(DH *dh)
+static int compute_key(unsigned char *key, const BIGNUM *pub_key, DH *dh)
 {
-    return dh->meth->generate_key(dh);
+    BN_CTX *ctx = NULL;
+    BN_MONT_CTX *mont = NULL;
+    BIGNUM *tmp;
+    int ret = -1;
+#ifndef FIPS_MODULE
+    int check_result;
+#endif
+
+    if (BN_num_bits(dh->params.p) > OPENSSL_DH_MAX_MODULUS_BITS) {
+        DHerr(0, DH_R_MODULUS_TOO_LARGE);
+        goto err;
+    }
+
+    if (BN_num_bits(dh->params.p) < DH_MIN_MODULUS_BITS) {
+        DHerr(0, DH_R_MODULUS_TOO_SMALL);
+        return 0;
+    }
+
+    ctx = BN_CTX_new_ex(dh->libctx);
+    if (ctx == NULL)
+        goto err;
+    BN_CTX_start(ctx);
+    tmp = BN_CTX_get(ctx);
+    if (tmp == NULL)
+        goto err;
+
+    if (dh->priv_key == NULL) {
+        DHerr(0, DH_R_NO_PRIVATE_VALUE);
+        goto err;
+    }
+
+    if (dh->flags & DH_FLAG_CACHE_MONT_P) {
+        mont = BN_MONT_CTX_set_locked(&dh->method_mont_p,
+                                      dh->lock, dh->params.p, ctx);
+        BN_set_flags(dh->priv_key, BN_FLG_CONSTTIME);
+        if (!mont)
+            goto err;
+    }
+/* TODO(3.0) : Solve in a PR related to Key validation for DH */
+#ifndef FIPS_MODULE
+    if (!DH_check_pub_key(dh, pub_key, &check_result) || check_result) {
+        DHerr(0, DH_R_INVALID_PUBKEY);
+        goto err;
+    }
+#endif
+    if (!dh->meth->bn_mod_exp(dh, tmp, pub_key, dh->priv_key, dh->params.p, ctx,
+                              mont)) {
+        DHerr(0, ERR_R_BN_LIB);
+        goto err;
+    }
+
+    ret = BN_bn2bin(tmp, key);
+ err:
+    BN_CTX_end(ctx);
+    BN_CTX_free(ctx);
+    return ret;
 }
 
 int DH_compute_key(unsigned char *key, const BIGNUM *pub_key, DH *dh)
 {
+#ifdef FIPS_MODULE
+    return compute_key(key, pub_key, dh);
+#else
     return dh->meth->compute_key(key, pub_key, dh);
+#endif
 }
 
 int DH_compute_key_padded(unsigned char *key, const BIGNUM *pub_key, DH *dh)
 {
     int rv, pad;
+
+#ifdef FIPS_MODULE
+    rv = compute_key(key, pub_key, dh);
+#else
     rv = dh->meth->compute_key(key, pub_key, dh);
+#endif
     if (rv <= 0)
         return rv;
-    pad = BN_num_bytes(dh->p) - rv;
+    pad = BN_num_bytes(dh->params.p) - rv;
     if (pad > 0) {
         memmove(key + pad, key, rv);
         memset(key, 0, pad);
@@ -105,21 +133,104 @@ static DH_METHOD dh_ossl = {
     NULL
 };
 
+static const DH_METHOD *default_DH_method = &dh_ossl;
+
 const DH_METHOD *DH_OpenSSL(void)
 {
     return &dh_ossl;
+}
+
+const DH_METHOD *DH_get_default_method(void)
+{
+    return default_DH_method;
+}
+
+static int dh_bn_mod_exp(const DH *dh, BIGNUM *r,
+                         const BIGNUM *a, const BIGNUM *p,
+                         const BIGNUM *m, BN_CTX *ctx, BN_MONT_CTX *m_ctx)
+{
+    return BN_mod_exp_mont(r, a, p, m, ctx, m_ctx);
+}
+
+static int dh_init(DH *dh)
+{
+    dh->flags |= DH_FLAG_CACHE_MONT_P;
+    ffc_params_init(&dh->params);
+    dh->dirty_cnt++;
+    return 1;
+}
+
+static int dh_finish(DH *dh)
+{
+    BN_MONT_CTX_free(dh->method_mont_p);
+    return 1;
+}
+
+#ifndef FIPS_MODULE
+void DH_set_default_method(const DH_METHOD *meth)
+{
+    default_DH_method = meth;
+}
+#endif /* FIPS_MODULE */
+
+int DH_generate_key(DH *dh)
+{
+#ifdef FIPS_MODULE
+    return generate_key(dh);
+#else
+    return dh->meth->generate_key(dh);
+#endif
+}
+
+int dh_generate_public_key(BN_CTX *ctx, DH *dh, const BIGNUM *priv_key,
+                           BIGNUM *pub_key)
+{
+    int ret = 0;
+    BIGNUM *prk = BN_new();
+    BN_MONT_CTX *mont = NULL;
+
+    if (prk == NULL)
+        return 0;
+
+    if (dh->flags & DH_FLAG_CACHE_MONT_P) {
+        mont = BN_MONT_CTX_set_locked(&dh->method_mont_p,
+                                      dh->lock, dh->params.p, ctx);
+        if (mont == NULL)
+            goto err;
+    }
+    BN_with_flags(prk, priv_key, BN_FLG_CONSTTIME);
+
+    /* pub_key = g^priv_key mod p */
+    if (!dh->meth->bn_mod_exp(dh, pub_key, dh->params.g, prk, dh->params.p,
+                              ctx, mont))
+        goto err;
+    ret = 1;
+err:
+    BN_clear_free(prk);
+    return ret;
 }
 
 static int generate_key(DH *dh)
 {
     int ok = 0;
     int generate_new_key = 0;
+#ifndef FIPS_MODULE
     unsigned l;
-    BN_CTX *ctx;
-    BN_MONT_CTX *mont = NULL;
+#endif
+    BN_CTX *ctx = NULL;
     BIGNUM *pub_key = NULL, *priv_key = NULL;
 
-    ctx = BN_CTX_new();
+    if (BN_num_bits(dh->params.p) > OPENSSL_DH_MAX_MODULUS_BITS) {
+        DHerr(0, DH_R_MODULUS_TOO_LARGE);
+        return 0;
+    }
+
+    if (BN_num_bits(dh->params.p) < DH_MIN_MODULUS_BITS) {
+        DHerr(0, DH_R_MODULUS_TOO_SMALL);
+        return 0;
+    }
+
+    ctx = BN_CTX_new_ex(dh->libctx);
     if (ctx == NULL)
         goto err;
 
@@ -128,152 +239,160 @@ static int generate_key(DH *dh)
         if (priv_key == NULL)
             goto err;
         generate_new_key = 1;
-    } else
+    } else {
         priv_key = dh->priv_key;
+    }
 
     if (dh->pub_key == NULL) {
         pub_key = BN_new();
         if (pub_key == NULL)
             goto err;
-    } else
+    } else {
         pub_key = dh->pub_key;
-
-    if (dh->flags & DH_FLAG_CACHE_MONT_P) {
-        mont = BN_MONT_CTX_set_locked(&dh->method_mont_p,
-                                      dh->lock, dh->p, ctx);
-        if (!mont)
-            goto err;
     }
-
     if (generate_new_key) {
-        if (dh->q) {
-            do {
-                if (!BN_rand_range(priv_key, dh->q))
+        /* Is it an approved safe prime ?*/
+        if (DH_get_nid(dh) != NID_undef) {
+            int max_strength =
+                    ifc_ffc_compute_security_bits(BN_num_bits(dh->params.p));
+
+            if (dh->params.q == NULL
+                || dh->length > BN_num_bits(dh->params.q))
+                goto err;
+            /* dh->length = maximum bit length of generated private key */
+            if (!ffc_generate_private_key(ctx, &dh->params, dh->length,
+                                          max_strength, priv_key))
+                goto err;
+        } else {
+#ifdef FIPS_MODULE
+            if (dh->params.q == NULL)
+                goto err;
+#else
+            if (dh->params.q == NULL) {
+                /* secret exponent length */
+                l = dh->length ? dh->length : BN_num_bits(dh->params.p) - 1;
+                if (!BN_priv_rand_ex(priv_key, l, BN_RAND_TOP_ONE,
+                                     BN_RAND_BOTTOM_ANY, ctx))
+                    goto err;
+                /*
+                 * We handle just one known case where g is a quadratic non-residue:
+                 * for g = 2: p % 8 == 3
+                 */
+                if (BN_is_word(dh->params.g, DH_GENERATOR_2)
+                    && !BN_is_bit_set(dh->params.p, 2)) {
+                    /* clear bit 0, since it won't be a secret anyway */
+                    if (!BN_clear_bit(priv_key, 0))
+                        goto err;
+                }
+            } else
+#endif
+            {
+                /* Do a partial check for invalid p, q, g */
+                if (!ffc_params_simple_validate(dh->libctx, &dh->params,
+                                                FFC_PARAM_TYPE_DH))
+                    goto err;
+                /*
+                 * For FFC FIPS 186-4 keygen
+                 * security strength s = 112,
+                 * Max Private key size N = len(q)
+                 */
+                if (!ffc_generate_private_key(ctx, &dh->params,
+                                              BN_num_bits(dh->params.q),
+                                              MIN_STRENGTH,
+                                              priv_key))
                     goto err;
             }
-            while (BN_is_zero(priv_key) || BN_is_one(priv_key));
-        } else {
-            /* secret exponent length */
-            l = dh->length ? dh->length : BN_num_bits(dh->p) - 1;
-            if (!BN_rand(priv_key, l, 0, 0))
-                goto err;
         }
     }
 
-    {
-        BIGNUM *local_prk = NULL;
-        BIGNUM *prk;
-
-        if ((dh->flags & DH_FLAG_NO_EXP_CONSTTIME) == 0) {
-            local_prk = prk = BN_new();
-            if (local_prk == NULL)
-                goto err;
-            BN_with_flags(prk, priv_key, BN_FLG_CONSTTIME);
-        } else {
-            prk = priv_key;
-        }
-
-        if (!dh->meth->bn_mod_exp(dh, pub_key, dh->g, prk, dh->p, ctx, mont)) {
-            BN_free(local_prk);
-            goto err;
-        }
-        /* We MUST free local_prk before any further use of priv_key */
-        BN_free(local_prk);
-    }
+    if (!dh_generate_public_key(ctx, dh, priv_key, pub_key))
+        goto err;
 
     dh->pub_key = pub_key;
     dh->priv_key = priv_key;
+    dh->dirty_cnt++;
     ok = 1;
  err:
     if (ok != 1)
-        DHerr(DH_F_GENERATE_KEY, ERR_R_BN_LIB);
+        DHerr(0, ERR_R_BN_LIB);
 
     if (pub_key != dh->pub_key)
         BN_free(pub_key);
     if (priv_key != dh->priv_key)
         BN_free(priv_key);
     BN_CTX_free(ctx);
-    return (ok);
+    return ok;
 }
 
-static int compute_key(unsigned char *key, const BIGNUM *pub_key, DH *dh)
+int dh_buf2key(DH *dh, const unsigned char *buf, size_t len)
 {
-    BN_CTX *ctx = NULL;
-    BN_MONT_CTX *mont = NULL;
-    BIGNUM *tmp;
-    int ret = -1;
-    int check_result;
+    int err_reason = DH_R_BN_ERROR;
+    BIGNUM *pubkey = NULL;
+    const BIGNUM *p;
+    size_t p_size;
 
-    if (BN_num_bits(dh->p) > OPENSSL_DH_MAX_MODULUS_BITS) {
-        DHerr(DH_F_COMPUTE_KEY, DH_R_MODULUS_TOO_LARGE);
+    if ((pubkey = BN_bin2bn(buf, len, NULL)) == NULL)
+        goto err;
+    DH_get0_pqg(dh, &p, NULL, NULL);
+    if (p == NULL || (p_size = BN_num_bytes(p)) == 0) {
+        err_reason = DH_R_NO_PARAMETERS_SET;
         goto err;
     }
-
-    ctx = BN_CTX_new();
-    if (ctx == NULL)
-        goto err;
-    BN_CTX_start(ctx);
-    tmp = BN_CTX_get(ctx);
-
-    if (dh->priv_key == NULL) {
-        DHerr(DH_F_COMPUTE_KEY, DH_R_NO_PRIVATE_VALUE);
-        goto err;
-    }
-
-    if (dh->flags & DH_FLAG_CACHE_MONT_P) {
-        mont = BN_MONT_CTX_set_locked(&dh->method_mont_p,
-                                      dh->lock, dh->p, ctx);
-        if ((dh->flags & DH_FLAG_NO_EXP_CONSTTIME) == 0) {
-            /* XXX */
-            BN_set_flags(dh->priv_key, BN_FLG_CONSTTIME);
-        }
-        if (!mont)
-            goto err;
-    }
-
-    if (!DH_check_pub_key(dh, pub_key, &check_result) || check_result) {
-        DHerr(DH_F_COMPUTE_KEY, DH_R_INVALID_PUBKEY);
-        goto err;
-    }
-
-    if (!dh->
-        meth->bn_mod_exp(dh, tmp, pub_key, dh->priv_key, dh->p, ctx, mont)) {
-        DHerr(DH_F_COMPUTE_KEY, ERR_R_BN_LIB);
-        goto err;
-    }
-
-    ret = BN_bn2bin(tmp, key);
- err:
-    if (ctx != NULL) {
-        BN_CTX_end(ctx);
-        BN_CTX_free(ctx);
-    }
-    return (ret);
-}
-
-static int dh_bn_mod_exp(const DH *dh, BIGNUM *r,
-                         const BIGNUM *a, const BIGNUM *p,
-                         const BIGNUM *m, BN_CTX *ctx, BN_MONT_CTX *m_ctx)
-{
     /*
-     * If a is only one word long and constant time is false, use the faster
-     * exponentiation function.
+     * As per Section 4.2.8.1 of RFC 8446 fail if DHE's
+     * public key is of size not equal to size of p
      */
-    if (bn_get_top(a) == 1 && ((dh->flags & DH_FLAG_NO_EXP_CONSTTIME) != 0)) {
-        BN_ULONG A = bn_get_words(a)[0];
-        return BN_mod_exp_mont_word(r, A, p, m, ctx, m_ctx);
-    } else
-        return BN_mod_exp_mont(r, a, p, m, ctx, m_ctx);
+    if (BN_is_zero(pubkey) || p_size != len) {
+        err_reason = DH_R_INVALID_PUBKEY;
+        goto err;
+    }
+    if (DH_set0_key(dh, pubkey, NULL) != 1)
+        goto err;
+    return 1;
+err:
+    DHerr(DH_F_DH_BUF2KEY, err_reason);
+    BN_free(pubkey);
+    return 0;
 }
 
-static int dh_init(DH *dh)
+size_t dh_key2buf(const DH *dh, unsigned char **pbuf_out, size_t size, int alloc)
 {
-    dh->flags |= DH_FLAG_CACHE_MONT_P;
-    return (1);
-}
+    const BIGNUM *pubkey;
+    unsigned char *pbuf = NULL;
+    const BIGNUM *p;
+    int p_size;
 
-static int dh_finish(DH *dh)
-{
-    BN_MONT_CTX_free(dh->method_mont_p);
-    return (1);
+    DH_get0_pqg(dh, &p, NULL, NULL);
+    DH_get0_key(dh, &pubkey, NULL);
+    if (p == NULL || pubkey == NULL
+            || (p_size = BN_num_bytes(p)) == 0
+            || BN_num_bytes(pubkey) == 0) {
+        DHerr(DH_F_DH_KEY2BUF, DH_R_INVALID_PUBKEY);
+        return 0;
+    }
+    if (pbuf_out != NULL && (alloc || *pbuf_out != NULL)) {
+        if (!alloc) {
+            if (size >= (size_t)p_size)
+                pbuf = *pbuf_out;
+        } else {
+            pbuf = OPENSSL_malloc(p_size);
+        }
+
+        if (pbuf == NULL) {
+            DHerr(DH_F_DH_KEY2BUF, ERR_R_MALLOC_FAILURE);
+            return 0;
+        }
+        /*
+         * As per Section 4.2.8.1 of RFC 8446 left pad public
+         * key with zeros to the size of p
+         */
+        if (BN_bn2binpad(pubkey, pbuf, p_size) < 0) {
+            if (alloc)
+                OPENSSL_free(pbuf);
+            DHerr(DH_F_DH_KEY2BUF, DH_R_BN_ERROR);
+            return 0;
+        }
+        *pbuf_out = pbuf;
+    }
+    return p_size;
 }

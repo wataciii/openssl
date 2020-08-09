@@ -1,60 +1,17 @@
 /*
- * Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL project
- * 2006.
+ * Copyright 2006-2020 The OpenSSL Project Authors. All Rights Reserved.
+ *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
-/* ====================================================================
- * Copyright (c) 2006 The OpenSSL Project.  All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+
+/*
+ * ECDH and ECDSA low level APIs are deprecated for public use, but still ok
+ * for internal use.
  */
+#include "internal/deprecated.h"
 
 #include <stdio.h>
 #include "internal/cryptlib.h"
@@ -63,18 +20,22 @@
 #include <openssl/bn.h>
 #include <openssl/cms.h>
 #include <openssl/asn1t.h>
-#include "internal/asn1_int.h"
-#include "internal/evp_int.h"
+#include "crypto/asn1.h"
+#include "crypto/evp.h"
+#include <openssl/core_names.h>
+#include "openssl/param_build.h"
+#include "ec_local.h"
 
 #ifndef OPENSSL_NO_CMS
 static int ecdh_cms_decrypt(CMS_RecipientInfo *ri);
 static int ecdh_cms_encrypt(CMS_RecipientInfo *ri);
 #endif
 
-static int eckey_param2type(int *pptype, void **ppval, EC_KEY *ec_key)
+static int eckey_param2type(int *pptype, void **ppval, const EC_KEY *ec_key)
 {
     const EC_GROUP *group;
     int nid;
+
     if (ec_key == NULL || (group = EC_KEY_get0_group(ec_key)) == NULL) {
         ECerr(EC_F_ECKEY_PARAM2TYPE, EC_R_MISSING_PARAMETERS);
         return 0;
@@ -83,7 +44,14 @@ static int eckey_param2type(int *pptype, void **ppval, EC_KEY *ec_key)
         && (nid = EC_GROUP_get_curve_name(group)))
         /* we have a 'named curve' => just set the OID */
     {
-        *ppval = OBJ_nid2obj(nid);
+        ASN1_OBJECT *asn1obj = OBJ_nid2obj(nid);
+
+        if (asn1obj == NULL || OBJ_length(asn1obj) == 0) {
+            ASN1_OBJECT_free(asn1obj);
+            ECerr(EC_F_ECKEY_PARAM2TYPE, EC_R_MISSING_OID);
+            return 0;
+        }
+        *ppval = asn1obj;
         *pptype = V_ASN1_OBJECT;
     } else {                    /* explicit parameters */
 
@@ -105,7 +73,7 @@ static int eckey_param2type(int *pptype, void **ppval, EC_KEY *ec_key)
 
 static int eckey_pub_encode(X509_PUBKEY *pk, const EVP_PKEY *pkey)
 {
-    EC_KEY *ec_key = pkey->pkey.ec;
+    const EC_KEY *ec_key = pkey->pkey.ec;
     void *pval = NULL;
     int ptype;
     unsigned char *penc = NULL, *p;
@@ -137,31 +105,36 @@ static int eckey_pub_encode(X509_PUBKEY *pk, const EVP_PKEY *pkey)
     return 0;
 }
 
-static EC_KEY *eckey_type2param(int ptype, void *pval)
+static EC_KEY *eckey_type2param(int ptype, const void *pval,
+                                OPENSSL_CTX *libctx, const char *propq)
 {
     EC_KEY *eckey = NULL;
+    EC_GROUP *group = NULL;
+
+    if ((eckey = EC_KEY_new_with_libctx(libctx, propq)) == NULL) {
+        ECerr(EC_F_ECKEY_TYPE2PARAM, ERR_R_MALLOC_FAILURE);
+        goto ecerr;
+    }
+
     if (ptype == V_ASN1_SEQUENCE) {
-        ASN1_STRING *pstr = pval;
-        const unsigned char *pm = NULL;
-        int pmlen;
-        pm = pstr->data;
-        pmlen = pstr->length;
-        if ((eckey = d2i_ECParameters(NULL, &pm, pmlen)) == NULL) {
+        const ASN1_STRING *pstr = pval;
+        const unsigned char *pm = pstr->data;
+        int pmlen = pstr->length;
+
+
+        if (d2i_ECParameters(&eckey, &pm, pmlen) == NULL) {
             ECerr(EC_F_ECKEY_TYPE2PARAM, EC_R_DECODE_ERROR);
             goto ecerr;
         }
     } else if (ptype == V_ASN1_OBJECT) {
-        ASN1_OBJECT *poid = pval;
-        EC_GROUP *group;
+        const ASN1_OBJECT *poid = pval;
 
         /*
          * type == V_ASN1_OBJECT => the parameters are given by an asn1 OID
          */
-        if ((eckey = EC_KEY_new()) == NULL) {
-            ECerr(EC_F_ECKEY_TYPE2PARAM, ERR_R_MALLOC_FAILURE);
-            goto ecerr;
-        }
-        group = EC_GROUP_new_by_curve_name(OBJ_obj2nid(poid));
+
+        group = EC_GROUP_new_by_curve_name_with_libctx(libctx, propq,
+                                                       OBJ_obj2nid(poid));
         if (group == NULL)
             goto ecerr;
         EC_GROUP_set_asn1_flag(group, OPENSSL_EC_NAMED_CURVE);
@@ -177,13 +150,14 @@ static EC_KEY *eckey_type2param(int ptype, void *pval)
 
  ecerr:
     EC_KEY_free(eckey);
+    EC_GROUP_free(group);
     return NULL;
 }
 
-static int eckey_pub_decode(EVP_PKEY *pkey, X509_PUBKEY *pubkey)
+static int eckey_pub_decode(EVP_PKEY *pkey, const X509_PUBKEY *pubkey)
 {
     const unsigned char *p = NULL;
-    void *pval;
+    const void *pval;
     int ptype, pklen;
     EC_KEY *eckey = NULL;
     X509_ALGOR *palg;
@@ -192,7 +166,7 @@ static int eckey_pub_decode(EVP_PKEY *pkey, X509_PUBKEY *pubkey)
         return 0;
     X509_ALGOR_get0(NULL, &ptype, &pval, palg);
 
-    eckey = eckey_type2param(ptype, pval);
+    eckey = eckey_type2param(ptype, pval, NULL, NULL);
 
     if (!eckey) {
         ECerr(EC_F_ECKEY_PUB_DECODE, ERR_R_EC_LIB);
@@ -219,6 +193,9 @@ static int eckey_pub_cmp(const EVP_PKEY *a, const EVP_PKEY *b)
     const EC_GROUP *group = EC_KEY_get0_group(b->pkey.ec);
     const EC_POINT *pa = EC_KEY_get0_public_key(a->pkey.ec),
         *pb = EC_KEY_get0_public_key(b->pkey.ec);
+
+    if (group == NULL || pa == NULL || pb == NULL)
+        return -2;
     r = EC_POINT_cmp(group, pa, pb, NULL);
     if (r == 0)
         return 1;
@@ -227,26 +204,29 @@ static int eckey_pub_cmp(const EVP_PKEY *a, const EVP_PKEY *b)
     return -2;
 }
 
-static int eckey_priv_decode(EVP_PKEY *pkey, PKCS8_PRIV_KEY_INFO *p8)
+static int eckey_priv_decode_with_libctx(EVP_PKEY *pkey,
+                                         const PKCS8_PRIV_KEY_INFO *p8,
+                                         OPENSSL_CTX *libctx,
+                                         const char *propq)
 {
     const unsigned char *p = NULL;
-    void *pval;
+    const void *pval;
     int ptype, pklen;
     EC_KEY *eckey = NULL;
-    X509_ALGOR *palg;
+    const X509_ALGOR *palg;
 
     if (!PKCS8_pkey_get0(NULL, &p, &pklen, &palg, p8))
         return 0;
     X509_ALGOR_get0(NULL, &ptype, &pval, palg);
 
-    eckey = eckey_type2param(ptype, pval);
+    eckey = eckey_type2param(ptype, pval, libctx, propq);
 
-    if (!eckey)
+    if (eckey == NULL)
         goto ecliberr;
 
     /* We have parameters now set private key */
     if (!d2i_ECPrivateKey(&eckey, &p, pklen)) {
-        ECerr(EC_F_ECKEY_PRIV_DECODE, EC_R_DECODE_ERROR);
+        ECerr(0, EC_R_DECODE_ERROR);
         goto ecerr;
     }
 
@@ -254,7 +234,7 @@ static int eckey_priv_decode(EVP_PKEY *pkey, PKCS8_PRIV_KEY_INFO *p8)
     return 1;
 
  ecliberr:
-    ECerr(EC_F_ECKEY_PRIV_DECODE, ERR_R_EC_LIB);
+    ECerr(0, ERR_R_EC_LIB);
  ecerr:
     EC_KEY_free(eckey);
     return 0;
@@ -262,15 +242,13 @@ static int eckey_priv_decode(EVP_PKEY *pkey, PKCS8_PRIV_KEY_INFO *p8)
 
 static int eckey_priv_encode(PKCS8_PRIV_KEY_INFO *p8, const EVP_PKEY *pkey)
 {
-    EC_KEY *ec_key;
+    EC_KEY ec_key = *(pkey->pkey.ec);
     unsigned char *ep, *p;
     int eplen, ptype;
     void *pval;
-    unsigned int tmp_flags, old_flags;
+    unsigned int old_flags;
 
-    ec_key = pkey->pkey.ec;
-
-    if (!eckey_param2type(&ptype, &pval, ec_key)) {
+    if (!eckey_param2type(&ptype, &pval, &ec_key)) {
         ECerr(EC_F_ECKEY_PRIV_ENCODE, EC_R_DECODE_ERROR);
         return 0;
     }
@@ -281,34 +259,31 @@ static int eckey_priv_encode(PKCS8_PRIV_KEY_INFO *p8, const EVP_PKEY *pkey)
      * do not include the parameters in the SEC1 private key see PKCS#11
      * 12.11
      */
-    old_flags = EC_KEY_get_enc_flags(ec_key);
-    tmp_flags = old_flags | EC_PKEY_NO_PARAMETERS;
-    EC_KEY_set_enc_flags(ec_key, tmp_flags);
-    eplen = i2d_ECPrivateKey(ec_key, NULL);
+    old_flags = EC_KEY_get_enc_flags(&ec_key);
+    EC_KEY_set_enc_flags(&ec_key, old_flags | EC_PKEY_NO_PARAMETERS);
+
+    eplen = i2d_ECPrivateKey(&ec_key, NULL);
     if (!eplen) {
-        EC_KEY_set_enc_flags(ec_key, old_flags);
         ECerr(EC_F_ECKEY_PRIV_ENCODE, ERR_R_EC_LIB);
         return 0;
     }
     ep = OPENSSL_malloc(eplen);
     if (ep == NULL) {
-        EC_KEY_set_enc_flags(ec_key, old_flags);
         ECerr(EC_F_ECKEY_PRIV_ENCODE, ERR_R_MALLOC_FAILURE);
         return 0;
     }
     p = ep;
-    if (!i2d_ECPrivateKey(ec_key, &p)) {
-        EC_KEY_set_enc_flags(ec_key, old_flags);
+    if (!i2d_ECPrivateKey(&ec_key, &p)) {
         OPENSSL_free(ep);
         ECerr(EC_F_ECKEY_PRIV_ENCODE, ERR_R_EC_LIB);
         return 0;
     }
-    /* restore old encoding flags */
-    EC_KEY_set_enc_flags(ec_key, old_flags);
 
     if (!PKCS8_pkey_set0(p8, OBJ_nid2obj(NID_X9_62_id_ecPublicKey), 0,
-                         ptype, pval, ep, eplen))
+                         ptype, pval, ep, eplen)) {
+        OPENSSL_free(ep);
         return 0;
+    }
 
     return 1;
 }
@@ -326,6 +301,7 @@ static int ec_bits(const EVP_PKEY *pkey)
 static int ec_security_bits(const EVP_PKEY *pkey)
 {
     int ecbits = ec_bits(pkey);
+
     if (ecbits >= 512)
         return 256;
     if (ecbits >= 384)
@@ -341,7 +317,7 @@ static int ec_security_bits(const EVP_PKEY *pkey)
 
 static int ec_missing_parameters(const EVP_PKEY *pkey)
 {
-    if (EC_KEY_get0_group(pkey->pkey.ec) == NULL)
+    if (pkey->pkey.ec == NULL || EC_KEY_get0_group(pkey->pkey.ec) == NULL)
         return 1;
     return 0;
 }
@@ -349,23 +325,30 @@ static int ec_missing_parameters(const EVP_PKEY *pkey)
 static int ec_copy_parameters(EVP_PKEY *to, const EVP_PKEY *from)
 {
     EC_GROUP *group = EC_GROUP_dup(EC_KEY_get0_group(from->pkey.ec));
+
     if (group == NULL)
         return 0;
     if (to->pkey.ec == NULL) {
         to->pkey.ec = EC_KEY_new();
         if (to->pkey.ec == NULL)
-            return 0;
+            goto err;
     }
     if (EC_KEY_set_group(to->pkey.ec, group) == 0)
-        return 0;
+        goto err;
     EC_GROUP_free(group);
     return 1;
+ err:
+    EC_GROUP_free(group);
+    return 0;
 }
 
 static int ec_cmp_parameters(const EVP_PKEY *a, const EVP_PKEY *b)
 {
     const EC_GROUP *group_a = EC_KEY_get0_group(a->pkey.ec),
         *group_b = EC_KEY_get0_group(b->pkey.ec);
+
+    if (group_a == NULL || group_b == NULL)
+        return -2;
     if (EC_GROUP_cmp(group_a, group_b, NULL))
         return 0;
     else
@@ -396,7 +379,7 @@ static int do_EC_KEY_print(BIO *bp, const EC_KEY *x, int off, ec_print_t ktype)
         return 0;
     }
 
-    if (ktype != EC_KEY_PRINT_PARAM) {
+    if (ktype != EC_KEY_PRINT_PARAM && EC_KEY_get0_public_key(x) != NULL) {
         publen = EC_KEY_key2buf(x, EC_KEY_get_conv_form(x), &pub, NULL);
         if (publen == 0)
             goto err;
@@ -507,6 +490,7 @@ static int ec_pkey_ctrl(EVP_PKEY *pkey, int op, long arg1, void *arg2)
         if (arg1 == 0) {
             int snid, hnid;
             X509_ALGOR *alg1, *alg2;
+
             PKCS7_SIGNER_INFO_get0_algs(arg2, NULL, &alg1, &alg2);
             if (alg1 == NULL || alg1->algorithm == NULL)
                 return -1;
@@ -548,14 +532,272 @@ static int ec_pkey_ctrl(EVP_PKEY *pkey, int op, long arg1, void *arg2)
 #endif
 
     case ASN1_PKEY_CTRL_DEFAULT_MD_NID:
+        if (EVP_PKEY_id(pkey) == EVP_PKEY_SM2) {
+            /* For SM2, the only valid digest-alg is SM3 */
+            *(int *)arg2 = NID_sm3;
+            return 2;            /* Make it mandatory */
+        }
         *(int *)arg2 = NID_sha256;
-        return 2;
+        return 1;
+
+    case ASN1_PKEY_CTRL_SET1_TLS_ENCPT:
+        return EC_KEY_oct2key(EVP_PKEY_get0_EC_KEY(pkey), arg2, arg1, NULL);
+
+    case ASN1_PKEY_CTRL_GET1_TLS_ENCPT:
+        return EC_KEY_key2buf(EVP_PKEY_get0_EC_KEY(pkey),
+                              POINT_CONVERSION_UNCOMPRESSED, arg2, NULL);
 
     default:
         return -2;
 
     }
 
+}
+
+static int ec_pkey_check(const EVP_PKEY *pkey)
+{
+    EC_KEY *eckey = pkey->pkey.ec;
+
+    /* stay consistent to what EVP_PKEY_check demands */
+    if (eckey->priv_key == NULL) {
+        ECerr(EC_F_EC_PKEY_CHECK, EC_R_MISSING_PRIVATE_KEY);
+        return 0;
+    }
+
+    return EC_KEY_check_key(eckey);
+}
+
+static int ec_pkey_public_check(const EVP_PKEY *pkey)
+{
+    EC_KEY *eckey = pkey->pkey.ec;
+
+    /*
+     * Note: it unnecessary to check eckey->pub_key here since
+     * it will be checked in EC_KEY_check_key(). In fact, the
+     * EC_KEY_check_key() mainly checks the public key, and checks
+     * the private key optionally (only if there is one). So if
+     * someone passes a whole EC key (public + private), this
+     * will also work...
+     */
+
+    return EC_KEY_check_key(eckey);
+}
+
+static int ec_pkey_param_check(const EVP_PKEY *pkey)
+{
+    EC_KEY *eckey = pkey->pkey.ec;
+
+    /* stay consistent to what EVP_PKEY_check demands */
+    if (eckey->group == NULL) {
+        ECerr(EC_F_EC_PKEY_PARAM_CHECK, EC_R_MISSING_PARAMETERS);
+        return 0;
+    }
+
+    return EC_GROUP_check(eckey->group, NULL);
+}
+
+static
+size_t ec_pkey_dirty_cnt(const EVP_PKEY *pkey)
+{
+    return pkey->pkey.ec->dirty_cnt;
+}
+
+static ossl_inline
+int ecparams_to_params(const EC_KEY *eckey, OSSL_PARAM_BLD *tmpl)
+{
+    const EC_GROUP *ecg;
+    int curve_nid;
+
+    if (eckey == NULL)
+        return 0;
+
+    ecg = EC_KEY_get0_group(eckey);
+    if (ecg == NULL)
+        return 0;
+
+    curve_nid = EC_GROUP_get_curve_name(ecg);
+
+    if (curve_nid == NID_undef) {
+        /* explicit parameters */
+
+        /*
+         * TODO(3.0): should we support explicit parameters curves?
+         */
+        return 0;
+    } else {
+        /* named curve */
+        const char *curve_name = NULL;
+
+        if ((curve_name = OBJ_nid2sn(curve_nid)) == NULL)
+            return 0;
+
+        if (!OSSL_PARAM_BLD_push_utf8_string(tmpl, OSSL_PKEY_PARAM_GROUP_NAME,
+                                             curve_name, 0))
+            return 0;
+    }
+
+    return 1;
+}
+
+static
+int ec_pkey_export_to(const EVP_PKEY *from, void *to_keydata,
+                      EVP_KEYMGMT *to_keymgmt, OPENSSL_CTX *libctx,
+                      const char *propq)
+{
+    const EC_KEY *eckey = NULL;
+    const EC_GROUP *ecg = NULL;
+    unsigned char *pub_key_buf = NULL;
+    size_t pub_key_buflen;
+    OSSL_PARAM_BLD *tmpl;
+    OSSL_PARAM *params = NULL;
+    const BIGNUM *priv_key = NULL;
+    const EC_POINT *pub_point = NULL;
+    int selection = 0;
+    int rv = 0;
+    BN_CTX *bnctx = NULL;
+
+    if (from == NULL
+            || (eckey = from->pkey.ec) == NULL
+            || (ecg = EC_KEY_get0_group(eckey)) == NULL)
+        return 0;
+
+    /*
+     * If the EC_KEY method is foreign, then we can't be sure of anything,
+     * and can therefore not export or pretend to export.
+     */
+    if (EC_KEY_get_method(eckey) != EC_KEY_OpenSSL())
+        return 0;
+
+    tmpl = OSSL_PARAM_BLD_new();
+    if (tmpl == NULL)
+        return 0;
+
+    /* export the domain parameters */
+    if (!ecparams_to_params(eckey, tmpl))
+        goto err;
+    selection |= OSSL_KEYMGMT_SELECT_DOMAIN_PARAMETERS;
+
+    priv_key = EC_KEY_get0_private_key(eckey);
+    pub_point = EC_KEY_get0_public_key(eckey);
+
+    if (pub_point != NULL) {
+        /*
+         * EC_POINT_point2buf() can generate random numbers in some
+         * implementations so we need to ensure we use the correct libctx.
+         */
+        bnctx = BN_CTX_new_ex(libctx);
+        if (bnctx == NULL)
+            goto err;
+
+        /* convert pub_point to a octet string according to the SECG standard */
+        if ((pub_key_buflen = EC_POINT_point2buf(ecg, pub_point,
+                                                 POINT_CONVERSION_COMPRESSED,
+                                                 &pub_key_buf, bnctx)) == 0
+            || !OSSL_PARAM_BLD_push_octet_string(tmpl,
+                                                 OSSL_PKEY_PARAM_PUB_KEY,
+                                                 pub_key_buf,
+                                                 pub_key_buflen))
+            goto err;
+        selection |= OSSL_KEYMGMT_SELECT_PUBLIC_KEY;
+    }
+
+    if (priv_key != NULL) {
+        size_t sz;
+        int ecbits;
+        int ecdh_cofactor_mode;
+
+        /*
+         * Key import/export should never leak the bit length of the secret
+         * scalar in the key.
+         *
+         * For this reason, on export we use padded BIGNUMs with fixed length.
+         *
+         * When importing we also should make sure that, even if short lived,
+         * the newly created BIGNUM is marked with the BN_FLG_CONSTTIME flag as
+         * soon as possible, so that any processing of this BIGNUM might opt for
+         * constant time implementations in the backend.
+         *
+         * Setting the BN_FLG_CONSTTIME flag alone is never enough, we also have
+         * to preallocate the BIGNUM internal buffer to a fixed public size big
+         * enough that operations performed during the processing never trigger
+         * a realloc which would leak the size of the scalar through memory
+         * accesses.
+         *
+         * Fixed Length
+         * ------------
+         *
+         * The order of the large prime subgroup of the curve is our choice for
+         * a fixed public size, as that is generally the upper bound for
+         * generating a private key in EC cryptosystems and should fit all valid
+         * secret scalars.
+         *
+         * For padding on export we just use the bit length of the order
+         * converted to bytes (rounding up).
+         *
+         * For preallocating the BIGNUM storage we look at the number of "words"
+         * required for the internal representation of the order, and we
+         * preallocate 2 extra "words" in case any of the subsequent processing
+         * might temporarily overflow the order length.
+         */
+        ecbits = EC_GROUP_order_bits(ecg);
+        if (ecbits <= 0)
+            goto err;
+
+        sz = (ecbits + 7 ) / 8;
+        if (!OSSL_PARAM_BLD_push_BN_pad(tmpl,
+                                        OSSL_PKEY_PARAM_PRIV_KEY,
+                                        priv_key, sz))
+            goto err;
+        selection |= OSSL_KEYMGMT_SELECT_PRIVATE_KEY;
+
+        /*
+         * The ECDH Cofactor Mode is defined only if the EC_KEY actually
+         * contains a private key, so we check for the flag and export it only
+         * in this case.
+         */
+        ecdh_cofactor_mode =
+            (EC_KEY_get_flags(eckey) & EC_FLAG_COFACTOR_ECDH) ? 1 : 0;
+
+        /* Export the ECDH_COFACTOR_MODE parameter */
+        if (!OSSL_PARAM_BLD_push_int(tmpl,
+                                     OSSL_PKEY_PARAM_USE_COFACTOR_ECDH,
+                                     ecdh_cofactor_mode))
+            goto err;
+        selection |= OSSL_KEYMGMT_SELECT_OTHER_PARAMETERS;
+    }
+
+    params = OSSL_PARAM_BLD_to_param(tmpl);
+
+    /* We export, the provider imports */
+    rv = evp_keymgmt_import(to_keymgmt, to_keydata, selection, params);
+
+ err:
+    OSSL_PARAM_BLD_free(tmpl);
+    OSSL_PARAM_BLD_free_params(params);
+    OPENSSL_free(pub_key_buf);
+    BN_CTX_free(bnctx);
+    return rv;
+}
+
+static int ec_pkey_import_from(const OSSL_PARAM params[], void *vpctx)
+{
+    EVP_PKEY_CTX *pctx = vpctx;
+    EVP_PKEY *pkey = EVP_PKEY_CTX_get0_pkey(pctx);
+    EC_KEY *ec = EC_KEY_new_with_libctx(pctx->libctx, pctx->propquery);
+
+    if (ec == NULL) {
+        ERR_raise(ERR_LIB_DH, ERR_R_MALLOC_FAILURE);
+        return 0;
+    }
+
+    if (!ec_key_domparams_fromdata(ec, params)
+        || !ec_key_otherparams_fromdata(ec, params)
+        || !ec_key_fromdata(ec, params, 1)
+        || !EVP_PKEY_assign_EC_KEY(pkey, ec)) {
+        EC_KEY_free(ec);
+        return 0;
+    }
+    return 1;
 }
 
 const EVP_PKEY_ASN1_METHOD eckey_asn1_meth = {
@@ -570,7 +812,7 @@ const EVP_PKEY_ASN1_METHOD eckey_asn1_meth = {
     eckey_pub_cmp,
     eckey_pub_print,
 
-    eckey_priv_decode,
+    NULL,
     eckey_priv_encode,
     eckey_priv_print,
 
@@ -589,22 +831,60 @@ const EVP_PKEY_ASN1_METHOD eckey_asn1_meth = {
     int_ec_free,
     ec_pkey_ctrl,
     old_ec_priv_decode,
-    old_ec_priv_encode
+    old_ec_priv_encode,
+
+    0, 0, 0,
+
+    ec_pkey_check,
+    ec_pkey_public_check,
+    ec_pkey_param_check,
+
+    0, /* set_priv_key */
+    0, /* set_pub_key */
+    0, /* get_priv_key */
+    0, /* get_pub_key */
+
+    ec_pkey_dirty_cnt,
+    ec_pkey_export_to,
+    ec_pkey_import_from,
+    eckey_priv_decode_with_libctx
 };
+
+#if !defined(OPENSSL_NO_SM2)
+const EVP_PKEY_ASN1_METHOD sm2_asn1_meth = {
+   EVP_PKEY_SM2,
+   EVP_PKEY_EC,
+   ASN1_PKEY_ALIAS
+};
+#endif
+
+int EC_KEY_print(BIO *bp, const EC_KEY *x, int off)
+{
+    int private = EC_KEY_get0_private_key(x) != NULL;
+
+    return do_EC_KEY_print(bp, x, off,
+                private ? EC_KEY_PRINT_PRIVATE : EC_KEY_PRINT_PUBLIC);
+}
+
+int ECParameters_print(BIO *bp, const EC_KEY *x)
+{
+    return do_EC_KEY_print(bp, x, 4, EC_KEY_PRINT_PARAM);
+}
 
 #ifndef OPENSSL_NO_CMS
 
 static int ecdh_cms_set_peerkey(EVP_PKEY_CTX *pctx,
                                 X509_ALGOR *alg, ASN1_BIT_STRING *pubkey)
 {
-    ASN1_OBJECT *aoid;
+    const ASN1_OBJECT *aoid;
     int atype;
-    void *aval;
+    const void *aval;
     int rv = 0;
     EVP_PKEY *pkpeer = NULL;
     EC_KEY *ecpeer = NULL;
     const unsigned char *p;
     int plen;
+
     X509_ALGOR_get0(&aoid, &atype, &aval, alg);
     if (OBJ_obj2nid(aoid) != NID_X9_62_id_ecPublicKey)
         goto err;
@@ -613,7 +893,7 @@ static int ecdh_cms_set_peerkey(EVP_PKEY_CTX *pctx,
         const EC_GROUP *grp;
         EVP_PKEY *pk;
         pk = EVP_PKEY_CTX_get0_pkey(pctx);
-        if (!pk)
+        if (pk == NULL)
             goto err;
         grp = EC_KEY_get0_group(pk->pkey.ec);
         ecpeer = EC_KEY_new();
@@ -622,14 +902,14 @@ static int ecdh_cms_set_peerkey(EVP_PKEY_CTX *pctx,
         if (!EC_KEY_set_group(ecpeer, grp))
             goto err;
     } else {
-        ecpeer = eckey_type2param(atype, aval);
+        ecpeer = eckey_type2param(atype, aval, pctx->libctx, pctx->propquery);
         if (!ecpeer)
             goto err;
     }
     /* We have parameters now set public key */
     plen = ASN1_STRING_length(pubkey);
-    p = ASN1_STRING_data(pubkey);
-    if (!p || !plen)
+    p = ASN1_STRING_get0_data(pubkey);
+    if (p == NULL || plen == 0)
         goto err;
     if (!o2i_ECPublicKey(&ecpeer, &p, plen))
         goto err;
@@ -667,7 +947,7 @@ static int ecdh_cms_set_kdf_param(EVP_PKEY_CTX *pctx, int eckdf_nid)
     if (EVP_PKEY_CTX_set_ecdh_cofactor_mode(pctx, cofactor) <= 0)
         return 0;
 
-    if (EVP_PKEY_CTX_set_ecdh_kdf_type(pctx, EVP_PKEY_ECDH_KDF_X9_62) <= 0)
+    if (EVP_PKEY_CTX_set_ecdh_kdf_type(pctx, EVP_PKEY_ECDH_KDF_X9_63) <= 0)
         return 0;
 
     kdf_md = EVP_get_digestbynid(kdfmd_nid);
@@ -688,8 +968,9 @@ static int ecdh_cms_set_shared_info(EVP_PKEY_CTX *pctx, CMS_RecipientInfo *ri)
     const unsigned char *p;
     unsigned char *der = NULL;
     int plen, keylen;
-    const EVP_CIPHER *kekcipher;
+    EVP_CIPHER *kekcipher = NULL;
     EVP_CIPHER_CTX *kekctx;
+    const char *name;
 
     if (!CMS_RecipientInfo_kari_get0_alg(ri, &alg, &ukm))
         return 0;
@@ -705,13 +986,14 @@ static int ecdh_cms_set_shared_info(EVP_PKEY_CTX *pctx, CMS_RecipientInfo *ri)
     p = alg->parameter->value.sequence->data;
     plen = alg->parameter->value.sequence->length;
     kekalg = d2i_X509_ALGOR(NULL, &p, plen);
-    if (!kekalg)
+    if (kekalg == NULL)
         goto err;
     kekctx = CMS_RecipientInfo_kari_get0_ctx(ri);
-    if (!kekctx)
+    if (kekctx == NULL)
         goto err;
-    kekcipher = EVP_get_cipherbyobj(kekalg->algorithm);
-    if (!kekcipher || EVP_CIPHER_mode(kekcipher) != EVP_CIPH_WRAP_MODE)
+    name = OBJ_nid2sn(OBJ_obj2nid(kekalg->algorithm));
+    kekcipher = EVP_CIPHER_fetch(pctx->libctx, name, NULL);
+    if (kekcipher == NULL || EVP_CIPHER_mode(kekcipher) != EVP_CIPH_WRAP_MODE)
         goto err;
     if (!EVP_EncryptInit_ex(kekctx, kekcipher, NULL, NULL, NULL))
         goto err;
@@ -733,6 +1015,7 @@ static int ecdh_cms_set_shared_info(EVP_PKEY_CTX *pctx, CMS_RecipientInfo *ri)
 
     rv = 1;
  err:
+    EVP_CIPHER_free(kekcipher);
     X509_ALGOR_free(kekalg);
     OPENSSL_free(der);
     return rv;
@@ -741,13 +1024,15 @@ static int ecdh_cms_set_shared_info(EVP_PKEY_CTX *pctx, CMS_RecipientInfo *ri)
 static int ecdh_cms_decrypt(CMS_RecipientInfo *ri)
 {
     EVP_PKEY_CTX *pctx;
+
     pctx = CMS_RecipientInfo_get0_pkey_ctx(ri);
-    if (!pctx)
+    if (pctx == NULL)
         return 0;
     /* See if we need to set peer key */
     if (!EVP_PKEY_CTX_get0_peerkey(pctx)) {
         X509_ALGOR *alg;
         ASN1_BIT_STRING *pubkey;
+
         if (!CMS_RecipientInfo_kari_get0_orig_id(ri, &alg, &pubkey,
                                                  NULL, NULL, NULL))
             return 0;
@@ -773,7 +1058,7 @@ static int ecdh_cms_encrypt(CMS_RecipientInfo *ri)
     EVP_CIPHER_CTX *ctx;
     int keylen;
     X509_ALGOR *talg, *wrap_alg = NULL;
-    ASN1_OBJECT *aoid;
+    const ASN1_OBJECT *aoid;
     ASN1_BIT_STRING *pubkey;
     ASN1_STRING *wrap_str;
     ASN1_OCTET_STRING *ukm;
@@ -782,8 +1067,9 @@ static int ecdh_cms_encrypt(CMS_RecipientInfo *ri)
     int rv = 0;
     int ecdh_nid, kdf_type, kdf_nid, wrap_nid;
     const EVP_MD *kdf_md;
+
     pctx = CMS_RecipientInfo_get0_pkey_ctx(ri);
-    if (!pctx)
+    if (pctx == NULL)
         return 0;
     /* Get ephemeral key */
     pkey = EVP_PKEY_CTX_get0_pkey(pctx);
@@ -832,7 +1118,7 @@ static int ecdh_cms_encrypt(CMS_RecipientInfo *ri)
         ecdh_nid = NID_dh_cofactor_kdf;
 
     if (kdf_type == EVP_PKEY_ECDH_KDF_NONE) {
-        kdf_type = EVP_PKEY_ECDH_KDF_X9_62;
+        kdf_type = EVP_PKEY_ECDH_KDF_X9_63;
         if (EVP_PKEY_CTX_set_ecdh_kdf_type(pctx, kdf_type) <= 0)
             goto err;
     } else

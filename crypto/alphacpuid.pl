@@ -1,7 +1,13 @@
-#!/usr/bin/env perl
+#! /usr/bin/env perl
+# Copyright 2010-2020 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
 
-$output = pop;
-open STDOUT,">$stdout";
+
+$output = pop and open STDOUT,">$output";
 
 print <<'___';
 .text
@@ -127,6 +133,34 @@ OPENSSL_cleanse:
 	bne	$17,.Little
 .Ldone: ret	($26)
 .end	OPENSSL_cleanse
+
+.globl	CRYPTO_memcmp
+.ent	CRYPTO_memcmp
+CRYPTO_memcmp:
+	.frame	$30,0,$26
+	.prologue 0
+	xor	$0,$0,$0
+	beq	$18,.Lno_data
+
+	xor	$1,$1,$1
+	nop
+.Loop_cmp:
+	ldq_u	$2,0($16)
+	subq	$18,1,$18
+	ldq_u	$3,0($17)
+	extbl	$2,$16,$2
+	lda	$16,1($16)
+	extbl	$3,$17,$3
+	lda	$17,1($17)
+	xor	$3,$2,$2
+	or	$2,$0,$0
+	bne	$18,.Loop_cmp
+
+	subq	$31,$0,$0
+	srl	$0,63,$0
+.Lno_data:
+	ret	($26)
+.end	CRYPTO_memcmp
 ___
 {
 my ($out,$cnt,$max)=("\$16","\$17","\$18");
@@ -219,4 +253,4 @@ OPENSSL_instrument_bus2:
 ___
 }
 
-close STDOUT;
+close STDOUT or die "error closing STDOUT: $!";

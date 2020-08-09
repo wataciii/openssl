@@ -1,4 +1,11 @@
-#!/usr/bin/env perl
+#! /usr/bin/env perl
+# Copyright 2015-2020 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+
 
 # ====================================================================
 # Written by Andy Polyakov <appro@openssl.org> for the OpenSSL
@@ -26,9 +33,10 @@
 # on benchmark. Lower coefficients are for ECDSA sign, server-side
 # operation. Keep in mind that +200% means 3x improvement.
 
-$flavour = shift;
-if ($flavour=~/\w[\w\-]*\.\w+$/) { $output=$flavour; undef $flavour; }
-else { while (($output=shift) && ($output!~/\w[\w\-]*\.\w+$/)) {} }
+# $output is the last argument if it looks like a file (it has an extension)
+# $flavour is the first argument if it doesn't look like a file
+$output = $#ARGV >= 0 && $ARGV[$#ARGV] =~ m|\.\w+$| ? pop : undef;
+$flavour = $#ARGV >= 0 && $ARGV[0] !~ m|\.| ? shift : undef;
 
 if ($flavour && $flavour ne "void") {
     $0 =~ m/(.*[\/\\])[^\/\\]+$/; $dir=$1;
@@ -36,15 +44,15 @@ if ($flavour && $flavour ne "void") {
     ( $xlate="${dir}../../perlasm/arm-xlate.pl" and -f $xlate) or
     die "can't locate arm-xlate.pl";
 
-    open STDOUT,"| \"$^X\" $xlate $flavour $output";
+    open STDOUT,"| \"$^X\" $xlate $flavour \"$output\""
+        or die "can't call  $xlate: $!";
 } else {
-    open STDOUT,">$output";
+    $output and open STDOUT,">$output";
 }
 
 $code.=<<___;
 #include "arm_arch.h"
 
-.text
 #if defined(__thumb2__)
 .syntax	unified
 .thumb
@@ -73,6 +81,7 @@ close TABLE;
 die "insane number of elements" if ($#arr != 64*16*37-1);
 
 $code.=<<___;
+.rodata
 .globl	ecp_nistz256_precomputed
 .type	ecp_nistz256_precomputed,%object
 .align	12
@@ -97,6 +106,8 @@ for(1..37) {
 }
 $code.=<<___;
 .size	ecp_nistz256_precomputed,.-ecp_nistz256_precomputed
+
+.text
 .align	5
 .LRR:	@ 2^512 mod P precomputed for NIST P256 polynomial
 .long	0x00000003, 0x00000000, 0xffffffff, 0xfffffffb
@@ -167,10 +178,7 @@ __ecp_nistz256_mul_by_2:
 	adcs	$a6,$a6,$a6
 	mov	$ff,#0
 	adcs	$a7,$a7,$a7
-#ifdef	__thumb2__
-	it	cs
-#endif
-	movcs	$ff,#-1			@ $ff = carry ? -1 : 0
+	adc	$ff,$ff,#0
 
 	b	.Lreduce_by_sub
 .size	__ecp_nistz256_mul_by_2,.-__ecp_nistz256_mul_by_2
@@ -221,35 +229,45 @@ __ecp_nistz256_add:
 	adcs	$a6,$a6,$t2
 	mov	$ff,#0
 	adcs	$a7,$a7,$t3
-#ifdef	__thumb2__
-	it	cs
-#endif
-	movcs	$ff,#-1			@ $ff = carry ? -1 : 0, "broadcast" carry
+	adc	$ff,$ff,#0
 	ldr	lr,[sp],#4		@ pop lr
 
 .Lreduce_by_sub:
 
-	@ if a+b carries, subtract modulus.
+	@ if a+b >= modulus, subtract modulus.
 	@
+	@ But since comparison implies subtraction, we subtract
+	@ modulus and then add it back if subtraction borrowed.
+
+	subs	$a0,$a0,#-1
+	sbcs	$a1,$a1,#-1
+	sbcs	$a2,$a2,#-1
+	sbcs	$a3,$a3,#0
+	sbcs	$a4,$a4,#0
+	sbcs	$a5,$a5,#0
+	sbcs	$a6,$a6,#1
+	sbcs	$a7,$a7,#-1
+	sbc	$ff,$ff,#0
+
 	@ Note that because mod has special form, i.e. consists of
 	@ 0xffffffff, 1 and 0s, we can conditionally synthesize it by
-	@ using value of broadcasted carry as a whole or extracting
-	@ single bit. Follow $ff register...
+	@ using value of borrow as a whole or extracting single bit.
+	@ Follow $ff register...
 
-	subs	$a0,$a0,$ff		@ subtract synthesized modulus
-	sbcs	$a1,$a1,$ff
+	adds	$a0,$a0,$ff		@ add synthesized modulus
+	adcs	$a1,$a1,$ff
 	str	$a0,[$r_ptr,#0]
-	sbcs	$a2,$a2,$ff
+	adcs	$a2,$a2,$ff
 	str	$a1,[$r_ptr,#4]
-	sbcs	$a3,$a3,#0
+	adcs	$a3,$a3,#0
 	str	$a2,[$r_ptr,#8]
-	sbcs	$a4,$a4,#0
+	adcs	$a4,$a4,#0
 	str	$a3,[$r_ptr,#12]
-	sbcs	$a5,$a5,#0
+	adcs	$a5,$a5,#0
 	str	$a4,[$r_ptr,#16]
-	sbcs	$a6,$a6,$ff,lsr#31
+	adcs	$a6,$a6,$ff,lsr#31
 	str	$a5,[$r_ptr,#20]
-	sbcs	$a7,$a7,$ff
+	adcs	$a7,$a7,$ff
 	str	$a6,[$r_ptr,#24]
 	str	$a7,[$r_ptr,#28]
 
@@ -297,26 +315,29 @@ __ecp_nistz256_mul_by_3:
 	adcs	$a6,$a6,$a6
 	mov	$ff,#0
 	adcs	$a7,$a7,$a7
-#ifdef	__thumb2__
-	it	cs
-#endif
-	movcs	$ff,#-1			@ $ff = carry ? -1 : 0, "broadcast" carry
+	adc	$ff,$ff,#0
 
-	subs	$a0,$a0,$ff		@ subtract synthesized modulus, see
-					@ .Lreduce_by_sub for details, except
-					@ that we don't write anything to
-					@ memory, but keep intermediate
-					@ results in registers...
-	sbcs	$a1,$a1,$ff
-	sbcs	$a2,$a2,$ff
+	subs	$a0,$a0,#-1		@ .Lreduce_by_sub but without stores
+	sbcs	$a1,$a1,#-1
+	sbcs	$a2,$a2,#-1
 	sbcs	$a3,$a3,#0
 	sbcs	$a4,$a4,#0
-	 ldr	$b_ptr,[$a_ptr,#0]
 	sbcs	$a5,$a5,#0
+	sbcs	$a6,$a6,#1
+	sbcs	$a7,$a7,#-1
+	sbc	$ff,$ff,#0
+
+	adds	$a0,$a0,$ff		@ add synthesized modulus
+	adcs	$a1,$a1,$ff
+	adcs	$a2,$a2,$ff
+	adcs	$a3,$a3,#0
+	adcs	$a4,$a4,#0
+	 ldr	$b_ptr,[$a_ptr,#0]
+	adcs	$a5,$a5,#0
 	 ldr	$t1,[$a_ptr,#4]
-	sbcs	$a6,$a6,$ff,lsr#31
+	adcs	$a6,$a6,$ff,lsr#31
 	 ldr	$t2,[$a_ptr,#8]
-	sbcs	$a7,$a7,$ff
+	adc	$a7,$a7,$ff
 
 	ldr	$t0,[$a_ptr,#12]
 	adds	$a0,$a0,$b_ptr		@ 2*a[0:7]+=a[0:7]
@@ -332,10 +353,7 @@ __ecp_nistz256_mul_by_3:
 	adcs	$a6,$a6,$t2
 	mov	$ff,#0
 	adcs	$a7,$a7,$t3
-#ifdef	__thumb2__
-	it	cs
-#endif
-	movcs	$ff,#-1			@ $ff = carry ? -1 : 0, "broadcast" carry
+	adc	$ff,$ff,#0
 	ldr	lr,[sp],#4		@ pop lr
 
 	b	.Lreduce_by_sub
@@ -367,7 +385,7 @@ __ecp_nistz256_div_by_2:
 	mov	$ff,$a0,lsl#31		@ place least significant bit to most
 					@ significant position, now arithmetic
 					@ right shift by 31 will produce -1 or
-					@ 0, while logical rigth shift 1 or 0,
+					@ 0, while logical right shift 1 or 0,
 					@ this is how modulus is conditionally
 					@ synthesized in this case...
 	ldr	$a3,[$a_ptr,#12]
@@ -880,13 +898,13 @@ ecp_nistz256_scatter_w7:
 .Loop_scatter_w7:
 	ldr	$mask,[$inp],#4
 	subs	$index,$index,#1
-	strb	$mask,[$out,#64*0-1]
+	strb	$mask,[$out,#64*0]
 	mov	$mask,$mask,lsr#8
-	strb	$mask,[$out,#64*1-1]
+	strb	$mask,[$out,#64*1]
 	mov	$mask,$mask,lsr#8
-	strb	$mask,[$out,#64*2-1]
+	strb	$mask,[$out,#64*2]
 	mov	$mask,$mask,lsr#8
-	strb	$mask,[$out,#64*3-1]
+	strb	$mask,[$out,#64*3]
 	add	$out,$out,#64*4
 	bne	.Loop_scatter_w7
 
@@ -1203,25 +1221,42 @@ __ecp_nistz256_add_self:
 	adcs	$a6,$a6,$a6
 	mov	$ff,#0
 	adcs	$a7,$a7,$a7
-#ifdef	__thumb2__
-	it	cs
-#endif
-	movcs	$ff,#-1			@ $ff = carry ? -1 : 0
+	adc	$ff,$ff,#0
 
-	subs	$a0,$a0,$ff		@ subtract synthesized modulus
-	sbcs	$a1,$a1,$ff
-	str	$a0,[$r_ptr,#0]
-	sbcs	$a2,$a2,$ff
-	str	$a1,[$r_ptr,#4]
+	@ if a+b >= modulus, subtract modulus.
+	@
+	@ But since comparison implies subtraction, we subtract
+	@ modulus and then add it back if subtraction borrowed.
+
+	subs	$a0,$a0,#-1
+	sbcs	$a1,$a1,#-1
+	sbcs	$a2,$a2,#-1
 	sbcs	$a3,$a3,#0
-	str	$a2,[$r_ptr,#8]
 	sbcs	$a4,$a4,#0
-	str	$a3,[$r_ptr,#12]
 	sbcs	$a5,$a5,#0
+	sbcs	$a6,$a6,#1
+	sbcs	$a7,$a7,#-1
+	sbc	$ff,$ff,#0
+
+	@ Note that because mod has special form, i.e. consists of
+	@ 0xffffffff, 1 and 0s, we can conditionally synthesize it by
+	@ using value of borrow as a whole or extracting single bit.
+	@ Follow $ff register...
+
+	adds	$a0,$a0,$ff		@ add synthesized modulus
+	adcs	$a1,$a1,$ff
+	str	$a0,[$r_ptr,#0]
+	adcs	$a2,$a2,$ff
+	str	$a1,[$r_ptr,#4]
+	adcs	$a3,$a3,#0
+	str	$a2,[$r_ptr,#8]
+	adcs	$a4,$a4,#0
+	str	$a3,[$r_ptr,#12]
+	adcs	$a5,$a5,#0
 	str	$a4,[$r_ptr,#16]
-	sbcs	$a6,$a6,$ff,lsr#31
+	adcs	$a6,$a6,$ff,lsr#31
 	str	$a5,[$r_ptr,#20]
-	sbcs	$a7,$a7,$ff
+	adcs	$a7,$a7,$ff
 	str	$a6,[$r_ptr,#24]
 	str	$a7,[$r_ptr,#28]
 
@@ -1231,7 +1266,7 @@ __ecp_nistz256_add_self:
 ___
 
 ########################################################################
-# following subroutines are "literal" implemetation of those found in
+# following subroutines are "literal" implementation of those found in
 # ecp_nistz256.c
 #
 ########################################################################
@@ -1363,7 +1398,7 @@ my ($Z1sqr, $Z2sqr) = ($Hsqr, $Rsqr);
 # 256-bit vectors on top. Then note that we push
 # starting from r0, which means that we have copy of
 # input arguments just below these temporary vectors.
-# We use three of them for !in1infty, !in2intfy and
+# We use three of them for ~in1infty, ~in2infty and
 # result of check for zero.
 
 $code.=<<___;
@@ -1374,8 +1409,12 @@ ecp_nistz256_point_add:
 	stmdb	sp!,{r0-r12,lr}		@ push from r0, unusual, but intentional
 	sub	sp,sp,#32*18+16
 
-	ldmia	$b_ptr!,{r4-r11}	@ copy in2
+	ldmia	$b_ptr!,{r4-r11}	@ copy in2_x
 	add	r3,sp,#$in2_x
+	stmia	r3!,{r4-r11}
+	ldmia	$b_ptr!,{r4-r11}	@ copy in2_y
+	stmia	r3!,{r4-r11}
+	ldmia	$b_ptr,{r4-r11}		@ copy in2_z
 	orr	r12,r4,r5
 	orr	r12,r12,r6
 	orr	r12,r12,r7
@@ -1383,28 +1422,20 @@ ecp_nistz256_point_add:
 	orr	r12,r12,r9
 	orr	r12,r12,r10
 	orr	r12,r12,r11
-	stmia	r3!,{r4-r11}
-	ldmia	$b_ptr!,{r4-r11}
-	orr	r12,r12,r4
-	orr	r12,r12,r5
-	orr	r12,r12,r6
-	orr	r12,r12,r7
-	orr	r12,r12,r8
-	orr	r12,r12,r9
-	orr	r12,r12,r10
-	orr	r12,r12,r11
-	stmia	r3!,{r4-r11}
-	ldmia	$b_ptr,{r4-r11}
 	cmp	r12,#0
 #ifdef	__thumb2__
 	it	ne
 #endif
 	movne	r12,#-1
 	stmia	r3,{r4-r11}
-	str	r12,[sp,#32*18+8]	@ !in2infty
+	str	r12,[sp,#32*18+8]	@ ~in2infty
 
-	ldmia	$a_ptr!,{r4-r11}	@ copy in1
+	ldmia	$a_ptr!,{r4-r11}	@ copy in1_x
 	add	r3,sp,#$in1_x
+	stmia	r3!,{r4-r11}
+	ldmia	$a_ptr!,{r4-r11}	@ copy in1_y
+	stmia	r3!,{r4-r11}
+	ldmia	$a_ptr,{r4-r11}		@ copy in1_z
 	orr	r12,r4,r5
 	orr	r12,r12,r6
 	orr	r12,r12,r7
@@ -1412,25 +1443,13 @@ ecp_nistz256_point_add:
 	orr	r12,r12,r9
 	orr	r12,r12,r10
 	orr	r12,r12,r11
-	stmia	r3!,{r4-r11}
-	ldmia	$a_ptr!,{r4-r11}
-	orr	r12,r12,r4
-	orr	r12,r12,r5
-	orr	r12,r12,r6
-	orr	r12,r12,r7
-	orr	r12,r12,r8
-	orr	r12,r12,r9
-	orr	r12,r12,r10
-	orr	r12,r12,r11
-	stmia	r3!,{r4-r11}
-	ldmia	$a_ptr,{r4-r11}
 	cmp	r12,#0
 #ifdef	__thumb2__
 	it	ne
 #endif
 	movne	r12,#-1
 	stmia	r3,{r4-r11}
-	str	r12,[sp,#32*18+4]	@ !in1infty
+	str	r12,[sp,#32*18+4]	@ ~in1infty
 
 	add	$a_ptr,sp,#$in2_z
 	add	$b_ptr,sp,#$in2_z
@@ -1495,33 +1514,20 @@ ecp_nistz256_point_add:
 	orr	$a0,$a0,$a2
 	orr	$a4,$a4,$a6
 	orr	$a0,$a0,$a7
-	orrs	$a0,$a0,$a4
+	orr	$a0,$a0,$a4		@ ~is_equal(U1,U2)
 
-	bne	.Ladd_proceed		@ is_equal(U1,U2)?
+	ldr	$t0,[sp,#32*18+4]	@ ~in1infty
+	ldr	$t1,[sp,#32*18+8]	@ ~in2infty
+	ldr	$t2,[sp,#32*18+12]	@ ~is_equal(S1,S2)
+	mvn	$t0,$t0			@ -1/0 -> 0/-1
+	mvn	$t1,$t1			@ -1/0 -> 0/-1
+	orr	$a0,$t0
+	orr	$a0,$t1
+	orrs	$a0,$t2			@ set flags
 
-	ldr	$t0,[sp,#32*18+4]
-	ldr	$t1,[sp,#32*18+8]
-	ldr	$t2,[sp,#32*18+12]
-	tst	$t0,$t1
-	beq	.Ladd_proceed		@ (in1infty || in2infty)?
-	tst	$t2,$t2
-	beq	.Ladd_double		@ is_equal(S1,S2)?
+	@ if(~is_equal(U1,U2) | in1infty | in2infty | ~is_equal(S1,S2))
+	bne	.Ladd_proceed
 
-	ldr	$r_ptr,[sp,#32*18+16]
-	eor	r4,r4,r4
-	eor	r5,r5,r5
-	eor	r6,r6,r6
-	eor	r7,r7,r7
-	eor	r8,r8,r8
-	eor	r9,r9,r9
-	eor	r10,r10,r10
-	eor	r11,r11,r11
-	stmia	$r_ptr!,{r4-r11}
-	stmia	$r_ptr!,{r4-r11}
-	stmia	$r_ptr!,{r4-r11}
-	b	.Ladd_done
-
-.align	4
 .Ladd_double:
 	ldr	$a_ptr,[sp,#32*18+20]
 	add	sp,sp,#32*(18-5)+16	@ difference in frame sizes
@@ -1586,15 +1592,15 @@ ecp_nistz256_point_add:
 	add	$b_ptr,sp,#$S2
 	bl	__ecp_nistz256_sub_from	@ p256_sub(res_y, res_y, S2);
 
-	ldr	r11,[sp,#32*18+4]	@ !in1intfy
-	ldr	r12,[sp,#32*18+8]	@ !in2intfy
+	ldr	r11,[sp,#32*18+4]	@ ~in1infty
+	ldr	r12,[sp,#32*18+8]	@ ~in2infty
 	add	r1,sp,#$res_x
 	add	r2,sp,#$in2_x
-	and	r10,r11,r12
+	and	r10,r11,r12		@ ~in1infty & ~in2infty
 	mvn	r11,r11
 	add	r3,sp,#$in1_x
-	and	r11,r11,r12
-	mvn	r12,r12
+	and	r11,r11,r12		@ in1infty & ~in2infty
+	mvn	r12,r12			@ in2infty
 	ldr	$r_ptr,[sp,#32*18+16]
 ___
 for($i=0;$i<96;$i+=8) {			# conditional moves
@@ -1602,11 +1608,11 @@ $code.=<<___;
 	ldmia	r1!,{r4-r5}		@ res_x
 	ldmia	r2!,{r6-r7}		@ in2_x
 	ldmia	r3!,{r8-r9}		@ in1_x
-	and	r4,r4,r10
+	and	r4,r4,r10		@ ~in1infty & ~in2infty
 	and	r5,r5,r10
-	and	r6,r6,r11
+	and	r6,r6,r11		@ in1infty & ~in2infty
 	and	r7,r7,r11
-	and	r8,r8,r12
+	and	r8,r8,r12		@ in2infty
 	and	r9,r9,r12
 	orr	r4,r4,r6
 	orr	r5,r5,r7
@@ -1618,7 +1624,7 @@ ___
 $code.=<<___;
 .Ladd_done:
 	add	sp,sp,#32*18+16+16	@ +16 means "skip even over saved r0-r3"
-#if __ARM_ARCH__>=5 || defined(__thumb__)
+#if __ARM_ARCH__>=5 || !defined(__thumb__)
 	ldmia	sp!,{r4-r12,pc}
 #else
 	ldmia	sp!,{r4-r12,lr}
@@ -1641,7 +1647,7 @@ my $Z1sqr = $S2;
 # 256-bit vectors on top. Then note that we push
 # starting from r0, which means that we have copy of
 # input arguments just below these temporary vectors.
-# We use two of them for !in1infty, !in2intfy.
+# We use two of them for ~in1infty, ~in2infty.
 
 my @ONE_mont=(1,0,0,-1,-1,-1,-2,0);
 
@@ -1653,8 +1659,12 @@ ecp_nistz256_point_add_affine:
 	stmdb	sp!,{r0-r12,lr}		@ push from r0, unusual, but intentional
 	sub	sp,sp,#32*15
 
-	ldmia	$a_ptr!,{r4-r11}	@ copy in1
+	ldmia	$a_ptr!,{r4-r11}	@ copy in1_x
 	add	r3,sp,#$in1_x
+	stmia	r3!,{r4-r11}
+	ldmia	$a_ptr!,{r4-r11}	@ copy in1_y
+	stmia	r3!,{r4-r11}
+	ldmia	$a_ptr,{r4-r11}		@ copy in1_z
 	orr	r12,r4,r5
 	orr	r12,r12,r6
 	orr	r12,r12,r7
@@ -1662,27 +1672,15 @@ ecp_nistz256_point_add_affine:
 	orr	r12,r12,r9
 	orr	r12,r12,r10
 	orr	r12,r12,r11
-	stmia	r3!,{r4-r11}
-	ldmia	$a_ptr!,{r4-r11}
-	orr	r12,r12,r4
-	orr	r12,r12,r5
-	orr	r12,r12,r6
-	orr	r12,r12,r7
-	orr	r12,r12,r8
-	orr	r12,r12,r9
-	orr	r12,r12,r10
-	orr	r12,r12,r11
-	stmia	r3!,{r4-r11}
-	ldmia	$a_ptr,{r4-r11}
 	cmp	r12,#0
 #ifdef	__thumb2__
 	it	ne
 #endif
 	movne	r12,#-1
 	stmia	r3,{r4-r11}
-	str	r12,[sp,#32*15+4]	@ !in1infty
+	str	r12,[sp,#32*15+4]	@ ~in1infty
 
-	ldmia	$b_ptr!,{r4-r11}	@ copy in2
+	ldmia	$b_ptr!,{r4-r11}	@ copy in2_x
 	add	r3,sp,#$in2_x
 	orr	r12,r4,r5
 	orr	r12,r12,r6
@@ -1692,7 +1690,7 @@ ecp_nistz256_point_add_affine:
 	orr	r12,r12,r10
 	orr	r12,r12,r11
 	stmia	r3!,{r4-r11}
-	ldmia	$b_ptr!,{r4-r11}
+	ldmia	$b_ptr!,{r4-r11}	@ copy in2_y
 	orr	r12,r12,r4
 	orr	r12,r12,r5
 	orr	r12,r12,r6
@@ -1707,7 +1705,7 @@ ecp_nistz256_point_add_affine:
 	it	ne
 #endif
 	movne	r12,#-1
-	str	r12,[sp,#32*15+8]	@ !in2infty
+	str	r12,[sp,#32*15+8]	@ ~in2infty
 
 	add	$a_ptr,sp,#$in1_z
 	add	$b_ptr,sp,#$in1_z
@@ -1789,15 +1787,15 @@ ecp_nistz256_point_add_affine:
 	add	$b_ptr,sp,#$S2
 	bl	__ecp_nistz256_sub_from	@ p256_sub(res_y, res_y, S2);
 
-	ldr	r11,[sp,#32*15+4]	@ !in1intfy
-	ldr	r12,[sp,#32*15+8]	@ !in2intfy
+	ldr	r11,[sp,#32*15+4]	@ ~in1infty
+	ldr	r12,[sp,#32*15+8]	@ ~in2infty
 	add	r1,sp,#$res_x
 	add	r2,sp,#$in2_x
-	and	r10,r11,r12
+	and	r10,r11,r12		@ ~in1infty & ~in2infty
 	mvn	r11,r11
 	add	r3,sp,#$in1_x
-	and	r11,r11,r12
-	mvn	r12,r12
+	and	r11,r11,r12		@ in1infty & ~in2infty
+	mvn	r12,r12			@ in2infty
 	ldr	$r_ptr,[sp,#32*15]
 ___
 for($i=0;$i<64;$i+=8) {			# conditional moves
@@ -1805,11 +1803,11 @@ $code.=<<___;
 	ldmia	r1!,{r4-r5}		@ res_x
 	ldmia	r2!,{r6-r7}		@ in2_x
 	ldmia	r3!,{r8-r9}		@ in1_x
-	and	r4,r4,r10
+	and	r4,r4,r10		@ ~in1infty & ~in2infty
 	and	r5,r5,r10
-	and	r6,r6,r11
+	and	r6,r6,r11		@ in1infty & ~in2infty
 	and	r7,r7,r11
-	and	r8,r8,r12
+	and	r8,r8,r12		@ in2infty
 	and	r9,r9,r12
 	orr	r4,r4,r6
 	orr	r5,r5,r7
@@ -1855,4 +1853,4 @@ foreach (split("\n",$code)) {
 
 	print $_,"\n";
 }
-close STDOUT;	# enforce flush
+close STDOUT or die "error closing STDOUT: $!";	# enforce flush

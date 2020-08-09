@@ -1,60 +1,17 @@
 /*
- * Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL project
- * 2005.
+ * Copyright 2005-2020 The OpenSSL Project Authors. All Rights Reserved.
+ *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
-/* ====================================================================
- * Copyright (c) 2005 The OpenSSL Project.  All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+
+/*
+ * RSA low level APIs are deprecated for public use, but still ok for
+ * internal use.
  */
+#include "internal/deprecated.h"
 
 #include <stdio.h>
 #include "internal/cryptlib.h"
@@ -63,7 +20,7 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
-#include "rsa_locl.h"
+#include "rsa_local.h"
 
 static const unsigned char zeroes[] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 
@@ -90,7 +47,6 @@ int RSA_verify_PKCS1_PSS_mgf1(RSA *rsa, const unsigned char *mHash,
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
     unsigned char H_[EVP_MAX_MD_SIZE];
 
-
     if (ctx == NULL)
         goto err;
 
@@ -104,13 +60,12 @@ int RSA_verify_PKCS1_PSS_mgf1(RSA *rsa, const unsigned char *mHash,
      * Negative sLen has special meanings:
      *      -1      sLen == hLen
      *      -2      salt length is autorecovered from signature
+     *      -3      salt length is maximized
      *      -N      reserved
      */
-    if (sLen == -1)
+    if (sLen == RSA_PSS_SALTLEN_DIGEST) {
         sLen = hLen;
-    else if (sLen == -2)
-        sLen = -2;
-    else if (sLen < -2) {
+    } else if (sLen < RSA_PSS_SALTLEN_MAX) {
         RSAerr(RSA_F_RSA_VERIFY_PKCS1_PSS_MGF1, RSA_R_SLEN_CHECK_FAILED);
         goto err;
     }
@@ -125,7 +80,13 @@ int RSA_verify_PKCS1_PSS_mgf1(RSA *rsa, const unsigned char *mHash,
         EM++;
         emLen--;
     }
-    if (emLen < (hLen + sLen + 2)) { /* sLen can be small negative */
+    if (emLen < hLen + 2) {
+        RSAerr(RSA_F_RSA_VERIFY_PKCS1_PSS_MGF1, RSA_R_DATA_TOO_LARGE);
+        goto err;
+    }
+    if (sLen == RSA_PSS_SALTLEN_MAX) {
+        sLen = emLen - hLen - 2;
+    } else if (sLen > emLen - hLen - 2) { /* sLen can be small negative */
         RSAerr(RSA_F_RSA_VERIFY_PKCS1_PSS_MGF1, RSA_R_DATA_TOO_LARGE);
         goto err;
     }
@@ -151,12 +112,12 @@ int RSA_verify_PKCS1_PSS_mgf1(RSA *rsa, const unsigned char *mHash,
         RSAerr(RSA_F_RSA_VERIFY_PKCS1_PSS_MGF1, RSA_R_SLEN_RECOVERY_FAILED);
         goto err;
     }
-    if (sLen >= 0 && (maskedDBLen - i) != sLen) {
+    if (sLen != RSA_PSS_SALTLEN_AUTO && (maskedDBLen - i) != sLen) {
         RSAerr(RSA_F_RSA_VERIFY_PKCS1_PSS_MGF1, RSA_R_SLEN_CHECK_FAILED);
         goto err;
     }
     if (!EVP_DigestInit_ex(ctx, Hash, NULL)
-        || !EVP_DigestUpdate(ctx, zeroes, sizeof zeroes)
+        || !EVP_DigestUpdate(ctx, zeroes, sizeof(zeroes))
         || !EVP_DigestUpdate(ctx, mHash, hLen))
         goto err;
     if (maskedDBLen - i) {
@@ -168,8 +129,9 @@ int RSA_verify_PKCS1_PSS_mgf1(RSA *rsa, const unsigned char *mHash,
     if (memcmp(H_, H, hLen)) {
         RSAerr(RSA_F_RSA_VERIFY_PKCS1_PSS_MGF1, RSA_R_BAD_SIGNATURE);
         ret = 0;
-    } else
+    } else {
         ret = 1;
+    }
 
  err:
     OPENSSL_free(DB);
@@ -207,13 +169,14 @@ int RSA_padding_add_PKCS1_PSS_mgf1(RSA *rsa, unsigned char *EM,
      * Negative sLen has special meanings:
      *      -1      sLen == hLen
      *      -2      salt length is maximized
+     *      -3      same as above (on signing)
      *      -N      reserved
      */
-    if (sLen == -1)
+    if (sLen == RSA_PSS_SALTLEN_DIGEST) {
         sLen = hLen;
-    else if (sLen == -2)
-        sLen = -2;
-    else if (sLen < -2) {
+    } else if (sLen == RSA_PSS_SALTLEN_MAX_SIGN) {
+        sLen = RSA_PSS_SALTLEN_MAX;
+    } else if (sLen < RSA_PSS_SALTLEN_MAX) {
         RSAerr(RSA_F_RSA_PADDING_ADD_PKCS1_PSS_MGF1, RSA_R_SLEN_CHECK_FAILED);
         goto err;
     }
@@ -224,9 +187,14 @@ int RSA_padding_add_PKCS1_PSS_mgf1(RSA *rsa, unsigned char *EM,
         *EM++ = 0;
         emLen--;
     }
-    if (sLen == -2) {
+    if (emLen < hLen + 2) {
+        RSAerr(RSA_F_RSA_PADDING_ADD_PKCS1_PSS_MGF1,
+               RSA_R_DATA_TOO_LARGE_FOR_KEY_SIZE);
+        goto err;
+    }
+    if (sLen == RSA_PSS_SALTLEN_MAX) {
         sLen = emLen - hLen - 2;
-    } else if (emLen < (hLen + sLen + 2)) {
+    } else if (sLen > emLen - hLen - 2) {
         RSAerr(RSA_F_RSA_PADDING_ADD_PKCS1_PSS_MGF1,
                RSA_R_DATA_TOO_LARGE_FOR_KEY_SIZE);
         goto err;
@@ -238,7 +206,7 @@ int RSA_padding_add_PKCS1_PSS_mgf1(RSA *rsa, unsigned char *EM,
                    ERR_R_MALLOC_FAILURE);
             goto err;
         }
-        if (RAND_bytes(salt, sLen) <= 0)
+        if (RAND_bytes_ex(rsa->libctx, salt, sLen) <= 0)
             goto err;
     }
     maskedDBLen = emLen - hLen - 1;
@@ -247,7 +215,7 @@ int RSA_padding_add_PKCS1_PSS_mgf1(RSA *rsa, unsigned char *EM,
     if (ctx == NULL)
         goto err;
     if (!EVP_DigestInit_ex(ctx, Hash, NULL)
-        || !EVP_DigestUpdate(ctx, zeroes, sizeof zeroes)
+        || !EVP_DigestUpdate(ctx, zeroes, sizeof(zeroes))
         || !EVP_DigestUpdate(ctx, mHash, hLen))
         goto err;
     if (sLen && !EVP_DigestUpdate(ctx, salt, sLen))
@@ -282,10 +250,146 @@ int RSA_padding_add_PKCS1_PSS_mgf1(RSA *rsa, unsigned char *EM,
 
  err:
     EVP_MD_CTX_free(ctx);
-    OPENSSL_free(salt);
+    OPENSSL_clear_free(salt, (size_t)sLen); /* salt != NULL implies sLen > 0 */
 
     return ret;
 
+}
+
+/*
+ * The defaults for PSS restrictions are defined in RFC 8017, A.2.3 RSASSA-PSS
+ * (https://tools.ietf.org/html/rfc8017#appendix-A.2.3):
+ *
+ * If the default values of the hashAlgorithm, maskGenAlgorithm, and
+ * trailerField fields of RSASSA-PSS-params are used, then the algorithm
+ * identifier will have the following value:
+ *
+ *     rSASSA-PSS-Default-Identifier    RSASSA-AlgorithmIdentifier ::= {
+ *         algorithm   id-RSASSA-PSS,
+ *         parameters  RSASSA-PSS-params : {
+ *             hashAlgorithm       sha1,
+ *             maskGenAlgorithm    mgf1SHA1,
+ *             saltLength          20,
+ *             trailerField        trailerFieldBC
+ *         }
+ *     }
+ *
+ *     RSASSA-AlgorithmIdentifier ::= AlgorithmIdentifier {
+ *         {PKCS1Algorithms}
+ *     }
+ */
+static const RSA_PSS_PARAMS_30 default_RSASSA_PSS_params = {
+    NID_sha1,                    /* default hashAlgorithm */
+    {
+        NID_mgf1,                /* default maskGenAlgorithm */
+        NID_sha1                 /* default MGF1 hash */
+    },
+    20,                          /* default saltLength */
+    1                            /* default trailerField (0xBC) */
+};
+
+int rsa_pss_params_30_set_defaults(RSA_PSS_PARAMS_30 *rsa_pss_params)
+{
+    if (rsa_pss_params == NULL)
+        return 0;
+    *rsa_pss_params = default_RSASSA_PSS_params;
+    return 1;
+}
+
+int rsa_pss_params_30_is_unrestricted(const RSA_PSS_PARAMS_30 *rsa_pss_params)
+{
+    static RSA_PSS_PARAMS_30 pss_params_cmp = { 0, };
+
+    return rsa_pss_params == NULL
+        || memcmp(rsa_pss_params, &pss_params_cmp,
+                  sizeof(*rsa_pss_params)) == 0;
+}
+
+int rsa_pss_params_30_copy(RSA_PSS_PARAMS_30 *to,
+                           const RSA_PSS_PARAMS_30 *from)
+{
+    memcpy(to, from, sizeof(*to));
+    return 1;
+}
+
+int rsa_pss_params_30_set_hashalg(RSA_PSS_PARAMS_30 *rsa_pss_params,
+                                  int hashalg_nid)
+{
+    if (rsa_pss_params == NULL)
+        return 0;
+    rsa_pss_params->hash_algorithm_nid = hashalg_nid;
+    return 1;
+}
+
+int rsa_pss_params_30_set_maskgenalg(RSA_PSS_PARAMS_30 *rsa_pss_params,
+                                     int maskgenalg_nid)
+{
+    if (rsa_pss_params == NULL)
+        return 0;
+    rsa_pss_params->mask_gen.algorithm_nid = maskgenalg_nid;
+    return 1;
+}
+
+int rsa_pss_params_30_set_maskgenhashalg(RSA_PSS_PARAMS_30 *rsa_pss_params,
+                                         int maskgenhashalg_nid)
+{
+    if (rsa_pss_params == NULL)
+        return 0;
+    rsa_pss_params->mask_gen.hash_algorithm_nid = maskgenhashalg_nid;
+    return 1;
+}
+
+int rsa_pss_params_30_set_saltlen(RSA_PSS_PARAMS_30 *rsa_pss_params,
+                                  int saltlen)
+{
+    if (rsa_pss_params == NULL)
+        return 0;
+    rsa_pss_params->salt_len = saltlen;
+    return 1;
+}
+
+int rsa_pss_params_30_set_trailerfield(RSA_PSS_PARAMS_30 *rsa_pss_params,
+                                       int trailerfield)
+{
+    if (rsa_pss_params == NULL)
+        return 0;
+    rsa_pss_params->trailer_field = trailerfield;
+    return 1;
+}
+
+int rsa_pss_params_30_hashalg(const RSA_PSS_PARAMS_30 *rsa_pss_params)
+{
+    if (rsa_pss_params == NULL)
+        return default_RSASSA_PSS_params.hash_algorithm_nid;
+    return rsa_pss_params->hash_algorithm_nid;
+}
+
+int rsa_pss_params_30_maskgenalg(const RSA_PSS_PARAMS_30 *rsa_pss_params)
+{
+    if (rsa_pss_params == NULL)
+        return default_RSASSA_PSS_params.mask_gen.algorithm_nid;
+    return rsa_pss_params->mask_gen.algorithm_nid;
+}
+
+int rsa_pss_params_30_maskgenhashalg(const RSA_PSS_PARAMS_30 *rsa_pss_params)
+{
+    if (rsa_pss_params == NULL)
+        return default_RSASSA_PSS_params.hash_algorithm_nid;
+    return rsa_pss_params->mask_gen.hash_algorithm_nid;
+}
+
+int rsa_pss_params_30_saltlen(const RSA_PSS_PARAMS_30 *rsa_pss_params)
+{
+    if (rsa_pss_params == NULL)
+        return default_RSASSA_PSS_params.salt_len;
+    return rsa_pss_params->salt_len;
+}
+
+int rsa_pss_params_30_trailerfield(const RSA_PSS_PARAMS_30 *rsa_pss_params)
+{
+    if (rsa_pss_params == NULL)
+        return default_RSASSA_PSS_params.trailer_field;
+    return rsa_pss_params->trailer_field;
 }
 
 #if defined(_MSC_VER)

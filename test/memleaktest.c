@@ -1,91 +1,59 @@
-/* ====================================================================
- * Copyright (c) 2015 The OpenSSL Project.  All rights reserved.
+/*
+ * Copyright 2016-2017 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.openssl.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    openssl-core@openssl.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.openssl.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
-#include <stdio.h>
 #include <string.h>
 #include <openssl/bio.h>
 #include <openssl/crypto.h>
 
-int main(int argc, char **argv)
-{
-#ifndef OPENSSL_NO_CRYPTO_MDEBUG
-    char *p;
-    char *lost;
-    int noleak;
+#include "testutil.h"
 
-    p = getenv("OPENSSL_DEBUG_MEMORY");
-    if (p != NULL && strcmp(p, "on") == 0)
-        CRYPTO_set_mem_debug(1);
-    CRYPTO_mem_ctrl(CRYPTO_MEM_CHECK_ON);
+/* __has_feature is a clang-ism, while __SANITIZE_ADDRESS__ is a gcc-ism */
+#if defined(__has_feature)
+# if __has_feature(address_sanitizer)
+#  define __SANITIZE_ADDRESS__ 1
+# endif
+#endif
+/* If __SANITIZE_ADDRESS__ isn't defined, define it to be false */
+#ifndef __SANITIZE_ADDRESS__
+# define __SANITIZE_ADDRESS__ 0
+#endif
+
+/*
+ * We use a proper main function here instead of the custom main from the
+ * test framework to avoid CRYPTO_mem_leaks stuff.
+ */
+
+int main(int argc, char *argv[])
+{
+#if __SANITIZE_ADDRESS__
+    int exitcode = EXIT_SUCCESS;
+#else
+    /*
+     * When we don't sanitize, we set the exit code to what we would expect
+     * to get when we are sanitizing.  This makes it easy for wrapper scripts
+     * to detect that we get the result we expect.
+     */
+    int exitcode = EXIT_FAILURE;
+#endif
+    char *lost;
 
     lost = OPENSSL_malloc(3);
-    if (lost == NULL) {
-        fprintf(stderr, "OPENSSL_malloc failed\n");
-        return 1;
-    }
+    if (!TEST_ptr(lost))
+        return EXIT_FAILURE;
+
+    strcpy(lost, "ab");
 
     if (argv[1] && strcmp(argv[1], "freeit") == 0) {
         OPENSSL_free(lost);
-        lost = NULL;
+        exitcode = EXIT_SUCCESS;
     }
 
-    noleak = CRYPTO_mem_leaks_fp(stderr);
-    /* If -1 return value something bad happened */
-    if (noleak == -1)
-        return 1;
-    return ((lost != NULL) ^ (noleak == 0));
-#else
-    return 0;
-#endif
+    lost = NULL;
+    return exitcode;
 }

@@ -1,30 +1,42 @@
-{- use File::Spec::Functions qw/catdir rel2abs/; -}
-LIBS=libcrypto libssl
-ORDINALS[libcrypto]=crypto
-ORDINALS[libssl]=ssl
-INCLUDE[libcrypto]={- rel2abs(catdir($builddir,"include")) -} . crypto/include include
-INCLUDE[libssl]={- rel2abs(catdir($builddir,"include")) -} . include
-DEPEND[libssl]=libcrypto
+# Note that some of these directories are filtered in Configure.  Look for
+# %skipdir there for further explanations.
 
-IF[{- $config{target} =~ /^Cygwin/ -}]
- SHARED_NAME[libcrypto]=cygcrypto-{- $config{shlib_major}.".".$config{shlib_minor} -}
- SHARED_NAME[libssl]=cygssl-{- $config{shlib_major}.".".$config{shlib_minor} -}
-ELSIF[{- $config{target} =~ /^mingw/ -}]
- SHARED_NAME[libcrypto]=libcrypto-{- $config{shlib_major}."_".$config{shlib_minor} -}{- $config{target} eq "mingw64" ? "-x64" : "" -}
- SHARED_NAME[libssl]=libssl-{- $config{shlib_major}."_".$config{shlib_minor} -}{- $config{target} eq "mingw64" ? "-x64" : "" -}
-ELSIF[{- $config{target} =~ /^VC-/ -}]
- SHARED_NAME[libcrypto]=libcrypto-{- $config{shlib_major}."_".$config{shlib_minor} -}{- $config{target} =~ /^VC-WIN64/ ? "-x64" : "" -}
- SHARED_NAME[libssl]=libssl-{- $config{shlib_major}."_".$config{shlib_minor} -}{- $config{target} =~ /^VC-WIN64/ ? "-x64" : "" -}
+SUBDIRS=crypto ssl apps test util tools fuzz providers doc
+IF[{- !$disabled{'deprecated-3.0'} -}]
+  SUBDIRS=engines
 ENDIF
 
-# VMS has a cultural standard where all libraries are prefixed.
-# For OpenSSL, the choice is 'ossl$' (this prefix was claimed in a
-# conversation with VSI, Tuesday January 26 2016)
-# Also, it seems it's usual to have a suffix to the shared library name
-# for the different pointer sizes that were built for.
-IF[{- $config{target} =~ /^vms/ -}]
- RENAME[libcrypto]=ossl$libcrypto
- RENAME[libssl]=ossl$libssl
- SHARED_NAME[libcrypto]=ossl$libcrypto_shr{- $target{pointer_size} -}
- SHARED_NAME[libssl]=ossl$libssl_shr{- $target{pointer_size} -}
+LIBS=libcrypto libssl
+INCLUDE[libcrypto]=. include
+INCLUDE[libssl]=. include
+DEPEND[libssl]=libcrypto
+
+# Empty DEPEND "indices" means the dependencies are expected to be built
+# unconditionally before anything else.
+DEPEND[]=include/openssl/configuration.h include/openssl/opensslv.h \
+         include/openssl/fipskey.h \
+         include/crypto/bn_conf.h include/crypto/dso_conf.h \
+         doc/man7/openssl_user_macros.pod
+
+GENERATE[include/openssl/configuration.h]=include/openssl/configuration.h.in
+GENERATE[include/openssl/opensslv.h]=include/openssl/opensslv.h.in
+GENERATE[include/openssl/fipskey.h]=include/openssl/fipskey.h.in
+GENERATE[include/crypto/bn_conf.h]=include/crypto/bn_conf.h.in
+GENERATE[include/crypto/dso_conf.h]=include/crypto/dso_conf.h.in
+GENERATE[doc/man7/openssl_user_macros.pod]=doc/man7/openssl_user_macros.pod.in
+
+IF[{- defined $target{shared_defflag} -}]
+  SHARED_SOURCE[libcrypto]=libcrypto.ld
+  SHARED_SOURCE[libssl]=libssl.ld
+
+  GENERATE[libcrypto.ld]=util/libcrypto.num libcrypto
+  GENERATE[libssl.ld]=util/libssl.num libssl
+ENDIF
+
+IF[{- $config{target} =~ /^(?:Cygwin|mingw|VC-)/ -}]
+  GENERATE[libcrypto.rc]=util/mkrc.pl libcrypto
+  GENERATE[libssl.rc]=util/mkrc.pl libssl
+
+  SHARED_SOURCE[libcrypto]=libcrypto.rc
+  SHARED_SOURCE[libssl]=libssl.rc
 ENDIF

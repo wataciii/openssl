@@ -1,85 +1,25 @@
 /*
- * Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL project
- * 2000.
+ * Copyright 1999-2020 The OpenSSL Project Authors. All Rights Reserved.
+ *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
-/* ====================================================================
- * Copyright (c) 2000-2005 The OpenSSL Project.  All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+
+/*
+ * DSA low level APIs are deprecated for public use, but still ok for
+ * internal use.
  */
+#include "internal/deprecated.h"
 
 #include <stdio.h>
 #include "internal/cryptlib.h"
-#include <openssl/dsa.h>
+#include "dsa_local.h"
 #include <openssl/asn1.h>
 #include <openssl/asn1t.h>
 #include <openssl/rand.h>
-
-struct DSA_SIG_st {
-    BIGNUM *r;
-    BIGNUM *s;
-};
-
-ASN1_SEQUENCE(DSA_SIG) = {
-        ASN1_SIMPLE(DSA_SIG, r, CBIGNUM),
-        ASN1_SIMPLE(DSA_SIG, s, CBIGNUM)
-} static_ASN1_SEQUENCE_END(DSA_SIG)
-
-IMPLEMENT_ASN1_FUNCTIONS_const(DSA_SIG)
-
-void DSA_SIG_get0(BIGNUM **pr, BIGNUM **ps, const DSA_SIG *sig)
-{
-    *pr = sig->r;
-    *ps = sig->s;
-}
+#include "crypto/asn1_dsa.h"
 
 /* Override the default free and new methods */
 static int dsa_cb(int operation, ASN1_VALUE **pval, const ASN1_ITEM *it,
@@ -99,81 +39,34 @@ static int dsa_cb(int operation, ASN1_VALUE **pval, const ASN1_ITEM *it,
 }
 
 ASN1_SEQUENCE_cb(DSAPrivateKey, dsa_cb) = {
-        ASN1_SIMPLE(DSA, version, LONG),
-        ASN1_SIMPLE(DSA, p, BIGNUM),
-        ASN1_SIMPLE(DSA, q, BIGNUM),
-        ASN1_SIMPLE(DSA, g, BIGNUM),
+        ASN1_EMBED(DSA, version, INT32),
+        ASN1_SIMPLE(DSA, params.p, BIGNUM),
+        ASN1_SIMPLE(DSA, params.q, BIGNUM),
+        ASN1_SIMPLE(DSA, params.g, BIGNUM),
         ASN1_SIMPLE(DSA, pub_key, BIGNUM),
         ASN1_SIMPLE(DSA, priv_key, CBIGNUM)
 } static_ASN1_SEQUENCE_END_cb(DSA, DSAPrivateKey)
 
-IMPLEMENT_ASN1_ENCODE_FUNCTIONS_const_fname(DSA, DSAPrivateKey, DSAPrivateKey)
+IMPLEMENT_ASN1_ENCODE_FUNCTIONS_fname(DSA, DSAPrivateKey, DSAPrivateKey)
 
 ASN1_SEQUENCE_cb(DSAparams, dsa_cb) = {
-        ASN1_SIMPLE(DSA, p, BIGNUM),
-        ASN1_SIMPLE(DSA, q, BIGNUM),
-        ASN1_SIMPLE(DSA, g, BIGNUM),
+        ASN1_SIMPLE(DSA, params.p, BIGNUM),
+        ASN1_SIMPLE(DSA, params.q, BIGNUM),
+        ASN1_SIMPLE(DSA, params.g, BIGNUM),
 } static_ASN1_SEQUENCE_END_cb(DSA, DSAparams)
 
-IMPLEMENT_ASN1_ENCODE_FUNCTIONS_const_fname(DSA, DSAparams, DSAparams)
+IMPLEMENT_ASN1_ENCODE_FUNCTIONS_fname(DSA, DSAparams, DSAparams)
 
 ASN1_SEQUENCE_cb(DSAPublicKey, dsa_cb) = {
         ASN1_SIMPLE(DSA, pub_key, BIGNUM),
-        ASN1_SIMPLE(DSA, p, BIGNUM),
-        ASN1_SIMPLE(DSA, q, BIGNUM),
-        ASN1_SIMPLE(DSA, g, BIGNUM)
+        ASN1_SIMPLE(DSA, params.p, BIGNUM),
+        ASN1_SIMPLE(DSA, params.q, BIGNUM),
+        ASN1_SIMPLE(DSA, params.g, BIGNUM)
 } static_ASN1_SEQUENCE_END_cb(DSA, DSAPublicKey)
 
-IMPLEMENT_ASN1_ENCODE_FUNCTIONS_const_fname(DSA, DSAPublicKey, DSAPublicKey)
+IMPLEMENT_ASN1_ENCODE_FUNCTIONS_fname(DSA, DSAPublicKey, DSAPublicKey)
 
-DSA *DSAparams_dup(DSA *dsa)
+DSA *DSAparams_dup(const DSA *dsa)
 {
     return ASN1_item_dup(ASN1_ITEM_rptr(DSAparams), dsa);
-}
-
-int DSA_sign(int type, const unsigned char *dgst, int dlen,
-             unsigned char *sig, unsigned int *siglen, DSA *dsa)
-{
-    DSA_SIG *s;
-    RAND_seed(dgst, dlen);
-    s = DSA_do_sign(dgst, dlen, dsa);
-    if (s == NULL) {
-        *siglen = 0;
-        return (0);
-    }
-    *siglen = i2d_DSA_SIG(s, &sig);
-    DSA_SIG_free(s);
-    return (1);
-}
-
-/* data has already been hashed (probably with SHA or SHA-1). */
-/*-
- * returns
- *      1: correct signature
- *      0: incorrect signature
- *     -1: error
- */
-int DSA_verify(int type, const unsigned char *dgst, int dgst_len,
-               const unsigned char *sigbuf, int siglen, DSA *dsa)
-{
-    DSA_SIG *s;
-    const unsigned char *p = sigbuf;
-    unsigned char *der = NULL;
-    int derlen = -1;
-    int ret = -1;
-
-    s = DSA_SIG_new();
-    if (s == NULL)
-        return (ret);
-    if (d2i_DSA_SIG(&s, &p, siglen) == NULL)
-        goto err;
-    /* Ensure signature uses DER and doesn't have trailing garbage */
-    derlen = i2d_DSA_SIG(s, &der);
-    if (derlen != siglen || memcmp(sigbuf, der, derlen))
-        goto err;
-    ret = DSA_do_verify(dgst, dgst_len, s, dsa);
- err:
-    OPENSSL_clear_free(der, derlen);
-    DSA_SIG_free(s);
-    return (ret);
 }

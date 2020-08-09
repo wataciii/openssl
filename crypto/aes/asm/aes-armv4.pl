@@ -1,4 +1,11 @@
-#!/usr/bin/env perl
+#! /usr/bin/env perl
+# Copyright 2007-2020 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+
 
 # ====================================================================
 # Written by Andy Polyakov <appro@openssl.org> for the OpenSSL
@@ -32,9 +39,10 @@
 # Profiler-assisted and platform-specific optimization resulted in 16%
 # improvement on Cortex A8 core and ~21.5 cycles per byte.
 
-$flavour = shift;
-if ($flavour=~/\w[\w\-]*\.\w+$/) { $output=$flavour; undef $flavour; }
-else { while (($output=shift) && ($output!~/\w[\w\-]*\.\w+$/)) {} }
+# $output is the last argument if it looks like a file (it has an extension)
+# $flavour is the first argument if it doesn't look like a file
+$output = $#ARGV >= 0 && $ARGV[$#ARGV] =~ m|\.\w+$| ? pop : undef;
+$flavour = $#ARGV >= 0 && $ARGV[0] !~ m|\.| ? shift : undef;
 
 if ($flavour && $flavour ne "void") {
     $0 =~ m/(.*[\/\\])[^\/\\]+$/; $dir=$1;
@@ -42,9 +50,10 @@ if ($flavour && $flavour ne "void") {
     ( $xlate="${dir}../../perlasm/arm-xlate.pl" and -f $xlate) or
     die "can't locate arm-xlate.pl";
 
-    open STDOUT,"| \"$^X\" $xlate $flavour $output";
+    open STDOUT,"| \"$^X\" $xlate $flavour \"$output\""
+        or die "can't call $xlate: $!";
 } else {
-    open STDOUT,">$output";
+    $output and open STDOUT,">$output";
 }
 
 $s0="r0";
@@ -69,7 +78,6 @@ $code=<<___;
 # define __ARM_ARCH__ __LINUX_ARM_ARCH__
 #endif
 
-.text
 #if defined(__thumb2__) && !defined(__APPLE__)
 .syntax	unified
 .thumb
@@ -77,6 +85,8 @@ $code=<<___;
 .code	32
 #undef __thumb2__
 #endif
+
+.text
 
 .type	AES_Te,%object
 .align	5
@@ -193,10 +203,10 @@ AES_encrypt:
 #ifndef	__thumb2__
 	sub	r3,pc,#8		@ AES_encrypt
 #else
-	adr	r3,AES_encrypt
+	adr	r3,.
 #endif
 	stmdb   sp!,{r1,r4-r12,lr}
-#ifdef	__APPLE__
+#if defined(__thumb2__) || defined(__APPLE__)
 	adr	$tbl,AES_Te
 #else
 	sub	$tbl,r3,#AES_encrypt-AES_Te	@ Te
@@ -443,7 +453,7 @@ _armv4_AES_set_encrypt_key:
 #ifndef	__thumb2__
 	sub	r3,pc,#8		@ AES_set_encrypt_key
 #else
-	adr	r3,AES_set_encrypt_key
+	adr	r3,.
 #endif
 	teq	r0,#0
 #ifdef	__thumb2__
@@ -474,7 +484,7 @@ _armv4_AES_set_encrypt_key:
 	mov	lr,r1			@ bits
 	mov	$key,r2			@ key
 
-#ifdef	__APPLE__
+#if defined(__thumb2__) || defined(__APPLE__)
 	adr	$tbl,AES_Te+1024				@ Te4
 #else
 	sub	$tbl,r3,#_armv4_AES_set_encrypt_key-AES_Te-1024	@ Te4
@@ -969,10 +979,10 @@ AES_decrypt:
 #ifndef	__thumb2__
 	sub	r3,pc,#8		@ AES_decrypt
 #else
-	adr	r3,AES_decrypt
+	adr	r3,.
 #endif
 	stmdb   sp!,{r1,r4-r12,lr}
-#ifdef	__APPLE__
+#if defined(__thumb2__) || defined(__APPLE__)
 	adr	$tbl,AES_Td
 #else
 	sub	$tbl,r3,#AES_decrypt-AES_Td	@ Td
@@ -1235,4 +1245,4 @@ while(<SELF>) {
 close SELF;
 
 print $code;
-close STDOUT;	# enforce flush
+close STDOUT or die "error closing STDOUT: $!";	# enforce flush

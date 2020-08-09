@@ -1,65 +1,20 @@
 /*
- * Written by Matt Caswell for the OpenSSL project.
+ * Copyright 2015-2020 The OpenSSL Project Authors. All Rights Reserved.
+ *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
-/* ====================================================================
- * Copyright (c) 2015 The OpenSSL Project.  All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.openssl.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    openssl-core@openssl.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.openssl.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
- */
+
+#ifdef _WIN32
+# include <windows.h>
+#endif
 
 #include <stdio.h>
 #include <string.h>
 #include <openssl/async.h>
 #include <openssl/crypto.h>
-#include <../apps/apps.h>
 
 static int ctr = 0;
 static ASYNC_JOB *currjob = NULL;
@@ -88,22 +43,67 @@ static int save_current(void *args)
     return 1;
 }
 
+static int change_deflt_libctx(void *args)
+{
+    OPENSSL_CTX *libctx = OPENSSL_CTX_new();
+    OPENSSL_CTX *oldctx, *tmpctx;
+    int ret = 0;
+
+    if (libctx == NULL)
+        return 0;
+
+    oldctx = OPENSSL_CTX_set0_default(libctx);
+    ASYNC_pause_job();
+
+    /* Check the libctx is set up as we expect */
+    tmpctx = OPENSSL_CTX_set0_default(oldctx);
+    if (tmpctx != libctx)
+        goto err;
+
+    /* Set it back again to continue to use our own libctx */
+    oldctx = OPENSSL_CTX_set0_default(libctx);
+    ASYNC_pause_job();
+
+    /* Check the libctx is set up as we expect */
+    tmpctx = OPENSSL_CTX_set0_default(oldctx);
+    if (tmpctx != libctx)
+        goto err;
+
+    ret = 1;
+ err:
+    OPENSSL_CTX_free(libctx);
+    return ret;
+}
+
+
 #define MAGIC_WAIT_FD   ((OSSL_ASYNC_FD)99)
 static int waitfd(void *args)
 {
     ASYNC_JOB *job;
     ASYNC_WAIT_CTX *waitctx;
-    ASYNC_pause_job();
     job = ASYNC_get_current_job();
     if (job == NULL)
         return 0;
     waitctx = ASYNC_get_wait_ctx(job);
     if (waitctx == NULL)
         return 0;
-    if(!ASYNC_WAIT_CTX_set_wait_fd(waitctx, waitctx, MAGIC_WAIT_FD, NULL, NULL))
+
+    /* First case: no fd added or removed */
+    ASYNC_pause_job();
+
+    /* Second case: one fd added */
+    if (!ASYNC_WAIT_CTX_set_wait_fd(waitctx, waitctx, MAGIC_WAIT_FD, NULL, NULL))
         return 0;
     ASYNC_pause_job();
 
+    /* Third case: all fd removed */
+    if (!ASYNC_WAIT_CTX_clear_fd(waitctx, waitctx))
+        return 0;
+    ASYNC_pause_job();
+
+    /* Last case: fd added and immediately removed */
+    if (!ASYNC_WAIT_CTX_set_wait_fd(waitctx, waitctx, MAGIC_WAIT_FD, NULL, NULL))
+        return 0;
     if (!ASYNC_WAIT_CTX_clear_fd(waitctx, waitctx))
         return 0;
 
@@ -120,7 +120,7 @@ static int blockpause(void *args)
     return 1;
 }
 
-static int test_ASYNC_init_thread()
+static int test_ASYNC_init_thread(void)
 {
     ASYNC_JOB *job1 = NULL, *job2 = NULL, *job3 = NULL;
     int funcret1, funcret2, funcret3;
@@ -156,7 +156,44 @@ static int test_ASYNC_init_thread()
     return 1;
 }
 
-static int test_ASYNC_start_job()
+static int test_callback(void *arg)
+{
+    printf("callback test pass\n");
+    return 1;
+}
+
+static int test_ASYNC_callback_status(void)
+{
+    ASYNC_WAIT_CTX *waitctx = NULL;
+    int set_arg = 100;
+    ASYNC_callback_fn get_callback;
+    void *get_arg;
+    int set_status = 1;
+
+    if (       !ASYNC_init_thread(1, 0)
+            || (waitctx = ASYNC_WAIT_CTX_new()) == NULL
+            || ASYNC_WAIT_CTX_set_callback(waitctx, test_callback, (void*)&set_arg)
+               != 1
+            || ASYNC_WAIT_CTX_get_callback(waitctx, &get_callback, &get_arg)
+               != 1
+            || test_callback != get_callback
+            || get_arg != (void*)&set_arg
+            || (*get_callback)(get_arg) != 1
+            || ASYNC_WAIT_CTX_set_status(waitctx, set_status) != 1
+            || set_status != ASYNC_WAIT_CTX_get_status(waitctx)) {
+        fprintf(stderr, "test_ASYNC_callback_status() failed\n");
+        ASYNC_WAIT_CTX_free(waitctx);
+        ASYNC_cleanup_thread();
+        return 0;
+    }
+
+    ASYNC_WAIT_CTX_free(waitctx);
+    ASYNC_cleanup_thread();
+    return 1;
+
+}
+
+static int test_ASYNC_start_job(void)
 {
     ASYNC_JOB *job = NULL;
     int funcret;
@@ -184,7 +221,7 @@ static int test_ASYNC_start_job()
     return 1;
 }
 
-static int test_ASYNC_get_current_job()
+static int test_ASYNC_get_current_job(void)
 {
     ASYNC_JOB *job = NULL;
     int funcret;
@@ -211,7 +248,7 @@ static int test_ASYNC_get_current_job()
     return 1;
 }
 
-static int test_ASYNC_WAIT_CTX_get_all_fds()
+static int test_ASYNC_WAIT_CTX_get_all_fds(void)
 {
     ASYNC_JOB *job = NULL;
     int funcret;
@@ -239,15 +276,15 @@ static int test_ASYNC_WAIT_CTX_get_all_fds()
             || fd != MAGIC_WAIT_FD
             || (fd = OSSL_BAD_ASYNC_FD, 0) /* Assign to something else */
             || !ASYNC_WAIT_CTX_get_changed_fds(waitctx, NULL, &numfds, NULL,
-                                              &numdelfds)
+                                               &numdelfds)
             || numfds != 1
             || numdelfds != 0
             || !ASYNC_WAIT_CTX_get_changed_fds(waitctx, &fd, &numfds, NULL,
                                                &numdelfds)
             || fd != MAGIC_WAIT_FD
-               /* On final run we expect one deleted fd */
+               /* On third run we expect one deleted fd */
             || ASYNC_start_job(&job, waitctx, &funcret, waitfd, NULL, 0)
-                != ASYNC_FINISH
+                != ASYNC_PAUSE
             || !ASYNC_WAIT_CTX_get_all_fds(waitctx, NULL, &numfds)
             || numfds != 0
             || !ASYNC_WAIT_CTX_get_changed_fds(waitctx, NULL, &numfds, NULL,
@@ -257,6 +294,15 @@ static int test_ASYNC_WAIT_CTX_get_all_fds()
             || !ASYNC_WAIT_CTX_get_changed_fds(waitctx, NULL, &numfds, &delfd,
                                                &numdelfds)
             || delfd != MAGIC_WAIT_FD
+            /* On last run we are not expecting any wait fd */
+            || ASYNC_start_job(&job, waitctx, &funcret, waitfd, NULL, 0)
+                != ASYNC_FINISH
+            || !ASYNC_WAIT_CTX_get_all_fds(waitctx, NULL, &numfds)
+            || numfds != 0
+            || !ASYNC_WAIT_CTX_get_changed_fds(waitctx, NULL, &numfds, NULL,
+                                               &numdelfds)
+            || numfds != 0
+            || numdelfds != 0
             || funcret != 1) {
         fprintf(stderr, "test_ASYNC_get_wait_fd() failed\n");
         ASYNC_WAIT_CTX_free(waitctx);
@@ -269,7 +315,7 @@ static int test_ASYNC_WAIT_CTX_get_all_fds()
     return 1;
 }
 
-static int test_ASYNC_block_pause()
+static int test_ASYNC_block_pause(void)
 {
     ASYNC_JOB *job = NULL;
     int funcret;
@@ -293,20 +339,93 @@ static int test_ASYNC_block_pause()
     return 1;
 }
 
+static int test_ASYNC_start_job_with_libctx(void)
+{
+    ASYNC_JOB *job = NULL;
+    int funcret;
+    ASYNC_WAIT_CTX *waitctx = NULL;
+    OPENSSL_CTX *libctx = OPENSSL_CTX_new();
+    OPENSSL_CTX *oldctx, *tmpctx, *globalctx;
+    int ret = 0;
+
+    if (libctx == NULL) {
+        fprintf(stderr,
+                "test_ASYNC_start_job_with_libctx() failed to create libctx\n");
+        goto err;
+    }
+
+    globalctx = oldctx = OPENSSL_CTX_set0_default(libctx);
+
+    if ((waitctx = ASYNC_WAIT_CTX_new()) == NULL
+            || ASYNC_start_job(&job, waitctx, &funcret, change_deflt_libctx,
+                               NULL, 0)
+               != ASYNC_PAUSE) {
+        fprintf(stderr,
+                "test_ASYNC_start_job_with_libctx() failed to start job\n");
+        goto err;
+    }
+
+    /* Reset the libctx temporarily to find out what it is*/
+    tmpctx = OPENSSL_CTX_set0_default(oldctx);
+    oldctx = OPENSSL_CTX_set0_default(tmpctx);
+    if (tmpctx != libctx) {
+        fprintf(stderr,
+                "test_ASYNC_start_job_with_libctx() failed - unexpected libctx\n");
+        goto err;
+    }
+
+    if (ASYNC_start_job(&job, waitctx, &funcret, change_deflt_libctx, NULL, 0)
+               != ASYNC_PAUSE) {
+        fprintf(stderr,
+                "test_ASYNC_start_job_with_libctx() - restarting job failed\n");
+        goto err;
+    }
+
+    /* Reset the libctx and continue with the global default libctx */
+    tmpctx = OPENSSL_CTX_set0_default(oldctx);
+    if (tmpctx != libctx) {
+        fprintf(stderr,
+                "test_ASYNC_start_job_with_libctx() failed - unexpected libctx\n");
+        goto err;
+    }
+
+    if (ASYNC_start_job(&job, waitctx, &funcret, change_deflt_libctx, NULL, 0)
+               != ASYNC_FINISH
+                || funcret != 1) {
+        fprintf(stderr,
+                "test_ASYNC_start_job_with_libctx() - finishing job failed\n");
+        goto err;
+    }
+
+    /* Reset the libctx temporarily to find out what it is*/
+    tmpctx = OPENSSL_CTX_set0_default(libctx);
+    OPENSSL_CTX_set0_default(tmpctx);
+    if (tmpctx != globalctx) {
+        fprintf(stderr,
+                "test_ASYNC_start_job_with_libctx() failed - global libctx check failed\n");
+        goto err;
+    }
+
+    ret = 1;
+ err:
+    ASYNC_WAIT_CTX_free(waitctx);
+    OPENSSL_CTX_free(libctx);
+    return ret;
+}
+
 int main(int argc, char **argv)
 {
     if (!ASYNC_is_capable()) {
         fprintf(stderr,
                 "OpenSSL build is not ASYNC capable - skipping async tests\n");
     } else {
-        CRYPTO_set_mem_debug(1);
-        CRYPTO_mem_ctrl(CRYPTO_MEM_CHECK_ON);
-
-        if (       !test_ASYNC_init_thread()
+        if (!test_ASYNC_init_thread()
+                || !test_ASYNC_callback_status()
                 || !test_ASYNC_start_job()
                 || !test_ASYNC_get_current_job()
                 || !test_ASYNC_WAIT_CTX_get_all_fds()
-                || !test_ASYNC_block_pause()) {
+                || !test_ASYNC_block_pause()
+                || !test_ASYNC_start_job_with_libctx()) {
             return 1;
         }
     }

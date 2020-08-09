@@ -1,8 +1,15 @@
-#!/usr/bin/env perl
+#! /usr/bin/env perl
+# Copyright 2013-2020 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+
 
 # ====================================================================
-# Written by David S. Miller <davem@devemloft.net> and Andy Polyakov
-# <appro@openssl.org>. The module is licensed under 2-clause BSD
+# Written by David S. Miller and Andy Polyakov.
+# The module is licensed under 2-clause BSD
 # license. March 2013. All rights reserved.
 # ====================================================================
 
@@ -27,8 +34,7 @@ $0 =~ m/(.*[\/\\])[^\/\\]+$/; $dir=$1;
 push(@INC,"${dir}","${dir}../../perlasm");
 require "sparcv9_modes.pl";
 
-$output=pop;
-open STDOUT,">$output";
+$output=pop and open STDOUT,">$output";
 
 $code.=<<___;
 #include "sparc_arch.h"
@@ -99,7 +105,7 @@ $code.=<<___;
 des_t4_cbc_encrypt:
 	cmp		$len, 0
 	be,pn		$::size_t_cc, .Lcbc_abort
-	nop
+	srln		$len, 0, $len		! needed on v8+, "nop" on v9
 	ld		[$ivec + 0], %f0	! load ivec
 	ld		[$ivec + 4], %f1
 
@@ -200,7 +206,7 @@ des_t4_cbc_encrypt:
 des_t4_cbc_decrypt:
 	cmp		$len, 0
 	be,pn		$::size_t_cc, .Lcbc_abort
-	nop
+	srln		$len, 0, $len		! needed on v8+, "nop" on v9
 	ld		[$ivec + 0], %f2	! load ivec
 	ld		[$ivec + 4], %f3
 
@@ -308,7 +314,7 @@ $code.=<<___;
 des_t4_ede3_cbc_encrypt:
 	cmp		$len, 0
 	be,pn		$::size_t_cc, .Lcbc_abort
-	nop
+	srln		$len, 0, $len		! needed on v8+, "nop" on v9
 	ld		[$ivec + 0], %f0	! load ivec
 	ld		[$ivec + 4], %f1
 
@@ -460,7 +466,7 @@ des_t4_ede3_cbc_encrypt:
 des_t4_ede3_cbc_decrypt:
 	cmp		$len, 0
 	be,pn		$::size_t_cc, .Lcbc_abort
-	nop
+	srln		$len, 0, $len		! needed on v8+, "nop" on v9
 	ld		[$ivec + 0], %f2	! load ivec
 	ld		[$ivec + 4], %f3
 
@@ -617,4 +623,4 @@ ___
 
 &emit_assembler();
 
-close STDOUT;
+close STDOUT or die "error closing STDOUT: $!";

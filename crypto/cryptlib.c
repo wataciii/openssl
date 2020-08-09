@@ -1,174 +1,153 @@
-/* ====================================================================
- * Copyright (c) 1998-2006 The OpenSSL Project.  All rights reserved.
+/*
+ * Copyright 1998-2018 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright (c) 2002, Oracle and/or its affiliates. All rights reserved
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.openssl.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    openssl-core@openssl.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.openssl.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
- */
-/* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
- * All rights reserved.
- *
- * This package is an SSL implementation written
- * by Eric Young (eay@cryptsoft.com).
- * The implementation was written so as to conform with Netscapes SSL.
- *
- * This library is free for commercial and non-commercial use as long as
- * the following conditions are aheared to.  The following conditions
- * apply to all code found in this distribution, be it the RC4, RSA,
- * lhash, DES, etc., code; not just the SSL code.  The SSL documentation
- * included with this distribution is covered by the same copyright terms
- * except that the holder is Tim Hudson (tjh@cryptsoft.com).
- *
- * Copyright remains Eric Young's, and as such any Copyright notices in
- * the code are not to be removed.
- * If this package is used in a product, Eric Young should be given attribution
- * as the author of the parts of the library used.
- * This can be in the form of a textual message at program startup or
- * in documentation (online or textual) provided with the package.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. All advertising materials mentioning features or use of this software
- *    must display the following acknowledgement:
- *    "This product includes cryptographic software written by
- *     Eric Young (eay@cryptsoft.com)"
- *    The word 'cryptographic' can be left out if the rouines from the library
- *    being used are not cryptographic related :-).
- * 4. If you include any Windows specific code (or a derivative thereof) from
- *    the apps directory (application code) you must include an acknowledgement:
- *    "This product includes software written by Tim Hudson (tjh@cryptsoft.com)"
- *
- * THIS SOFTWARE IS PROVIDED BY ERIC YOUNG ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- *
- * The licence and distribution terms for any publically available version or
- * derivative of this code cannot be changed.  i.e. this code cannot simply be
- * copied and put under another distribution licence
- * [including the GNU Public Licence.]
- */
-/* ====================================================================
- * Copyright 2002 Sun Microsystems, Inc. ALL RIGHTS RESERVED.
- * ECDH support in OpenSSL originally developed by
- * SUN MICROSYSTEMS, INC., and contributed to the OpenSSL project.
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
-#include "internal/cryptlib_int.h"
+#include "e_os.h"
+#include "crypto/cryptlib.h"
 #include <openssl/safestack.h>
 
 #if     defined(__i386)   || defined(__i386__)   || defined(_M_IX86) || \
-        defined(__INTEL__) || \
         defined(__x86_64) || defined(__x86_64__) || \
         defined(_M_AMD64) || defined(_M_X64)
 
 extern unsigned int OPENSSL_ia32cap_P[4];
-unsigned int *OPENSSL_ia32cap_loc(void)
+
+# if defined(OPENSSL_CPUID_OBJ)
+
+/*
+ * Purpose of these minimalistic and character-type-agnostic subroutines
+ * is to break dependency on MSVCRT (on Windows) and locale. This makes
+ * OPENSSL_cpuid_setup safe to use as "constructor". "Character-type-
+ * agnostic" means that they work with either wide or 8-bit characters,
+ * exploiting the fact that first 127 characters can be simply casted
+ * between the sets, while the rest would be simply rejected by ossl_is*
+ * subroutines.
+ */
+#  ifdef _WIN32
+typedef WCHAR variant_char;
+
+static variant_char *ossl_getenv(const char *name)
 {
-    return OPENSSL_ia32cap_P;
+    /*
+     * Since we pull only one environment variable, it's simpler to
+     * to just ignore |name| and use equivalent wide-char L-literal.
+     * As well as to ignore excessively long values...
+     */
+    static WCHAR value[48];
+    DWORD len = GetEnvironmentVariableW(L"OPENSSL_ia32cap", value, 48);
+
+    return (len > 0 && len < 48) ? value : NULL;
+}
+#  else
+typedef char variant_char;
+#   define ossl_getenv getenv
+#  endif
+
+#  include "crypto/ctype.h"
+
+static int todigit(variant_char c)
+{
+    if (ossl_isdigit(c))
+        return c - '0';
+    else if (ossl_isxdigit(c))
+        return ossl_tolower(c) - 'a' + 10;
+
+    /* return largest base value to make caller terminate the loop */
+    return 16;
 }
 
-# if defined(OPENSSL_CPUID_OBJ) && !defined(OPENSSL_NO_ASM) && !defined(I386_ONLY)
-#include <stdio.h>
+static uint64_t ossl_strtouint64(const variant_char *str)
+{
+    uint64_t ret = 0;
+    unsigned int digit, base = 10;
+
+    if (*str == '0') {
+        base = 8, str++;
+        if (ossl_tolower(*str) == 'x')
+            base = 16, str++;
+    }
+
+    while((digit = todigit(*str++)) < base)
+        ret = ret * base + digit;
+
+    return ret;
+}
+
+static variant_char *ossl_strchr(const variant_char *str, char srch)
+{   variant_char c;
+
+    while((c = *str)) {
+        if (c == srch)
+            return (variant_char *)str;
+        str++;
+    }
+
+    return NULL;
+}
+
 #  define OPENSSL_CPUID_SETUP
 typedef uint64_t IA32CAP;
+
 void OPENSSL_cpuid_setup(void)
 {
     static int trigger = 0;
     IA32CAP OPENSSL_ia32_cpuid(unsigned int *);
     IA32CAP vec;
-    char *env;
+    const variant_char *env;
 
     if (trigger)
         return;
 
     trigger = 1;
-    if ((env = getenv("OPENSSL_ia32cap"))) {
+    if ((env = ossl_getenv("OPENSSL_ia32cap")) != NULL) {
         int off = (env[0] == '~') ? 1 : 0;
-#  if defined(_WIN32)
-        if (!sscanf(env + off, "%I64i", &vec))
-            vec = strtoul(env + off, NULL, 0);
-#  else
-        if (!sscanf(env + off, "%lli", (long long *)&vec))
-            vec = strtoul(env + off, NULL, 0);
-#  endif
-        if (off)
-            vec = OPENSSL_ia32_cpuid(OPENSSL_ia32cap_P) & ~vec;
-        else if (env[0] == ':')
-            vec = OPENSSL_ia32_cpuid(OPENSSL_ia32cap_P);
 
-        OPENSSL_ia32cap_P[2] = 0;
-        if ((env = strchr(env, ':'))) {
-            unsigned int vecx;
+        vec = ossl_strtouint64(env + off);
+
+        if (off) {
+            IA32CAP mask = vec;
+            vec = OPENSSL_ia32_cpuid(OPENSSL_ia32cap_P) & ~mask;
+            if (mask & (1<<24)) {
+                /*
+                 * User disables FXSR bit, mask even other capabilities
+                 * that operate exclusively on XMM, so we don't have to
+                 * double-check all the time. We mask PCLMULQDQ, AMD XOP,
+                 * AES-NI and AVX. Formally speaking we don't have to
+                 * do it in x86_64 case, but we can safely assume that
+                 * x86_64 users won't actually flip this flag.
+                 */
+                vec &= ~((IA32CAP)(1<<1|1<<11|1<<25|1<<28) << 32);
+            }
+        } else if (env[0] == ':') {
+            vec = OPENSSL_ia32_cpuid(OPENSSL_ia32cap_P);
+        }
+
+        if ((env = ossl_strchr(env, ':')) != NULL) {
+            IA32CAP vecx;
+
             env++;
             off = (env[0] == '~') ? 1 : 0;
-            vecx = strtoul(env + off, NULL, 0);
-            if (off)
-                OPENSSL_ia32cap_P[2] &= ~vecx;
-            else
-                OPENSSL_ia32cap_P[2] = vecx;
+            vecx = ossl_strtouint64(env + off);
+            if (off) {
+                OPENSSL_ia32cap_P[2] &= ~(unsigned int)vecx;
+                OPENSSL_ia32cap_P[3] &= ~(unsigned int)(vecx >> 32);
+            } else {
+                OPENSSL_ia32cap_P[2] = (unsigned int)vecx;
+                OPENSSL_ia32cap_P[3] = (unsigned int)(vecx >> 32);
+            }
+        } else {
+            OPENSSL_ia32cap_P[2] = 0;
+            OPENSSL_ia32cap_P[3] = 0;
         }
-    } else
+    } else {
         vec = OPENSSL_ia32_cpuid(OPENSSL_ia32cap_P);
+    }
 
     /*
      * |(1<<10) sets a reserved bit to signal that variable
@@ -181,70 +160,14 @@ void OPENSSL_cpuid_setup(void)
 # else
 unsigned int OPENSSL_ia32cap_P[4];
 # endif
-
-#else
-unsigned int *OPENSSL_ia32cap_loc(void)
-{
-    return NULL;
-}
 #endif
-int OPENSSL_NONPIC_relocated = 0;
 #if !defined(OPENSSL_CPUID_SETUP) && !defined(OPENSSL_CPUID_OBJ)
 void OPENSSL_cpuid_setup(void)
 {
 }
 #endif
 
-#if (defined(_WIN32) || defined(__CYGWIN__)) && defined(_WINDLL)
-# ifdef __CYGWIN__
-/* pick DLL_[PROCESS|THREAD]_[ATTACH|DETACH] definitions */
-#  include <windows.h>
-/*
- * this has side-effect of _WIN32 getting defined, which otherwise is
- * mutually exclusive with __CYGWIN__...
- */
-# endif
-
-/*
- * All we really need to do is remove the 'error' state when a thread
- * detaches
- */
-
-BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved);
-BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
-{
-    switch (fdwReason) {
-    case DLL_PROCESS_ATTACH:
-        OPENSSL_cpuid_setup();
-# if defined(_WIN32_WINNT)
-        {
-            IMAGE_DOS_HEADER *dos_header = (IMAGE_DOS_HEADER *) hinstDLL;
-            IMAGE_NT_HEADERS *nt_headers;
-
-            if (dos_header->e_magic == IMAGE_DOS_SIGNATURE) {
-                nt_headers = (IMAGE_NT_HEADERS *) ((char *)dos_header
-                                                   + dos_header->e_lfanew);
-                if (nt_headers->Signature == IMAGE_NT_SIGNATURE &&
-                    hinstDLL !=
-                    (HINSTANCE) (nt_headers->OptionalHeader.ImageBase))
-                    OPENSSL_NONPIC_relocated = 1;
-            }
-        }
-# endif
-        break;
-    case DLL_THREAD_ATTACH:
-        break;
-    case DLL_THREAD_DETACH:
-        OPENSSL_thread_stop();
-        break;
-    case DLL_PROCESS_DETACH:
-        break;
-    }
-    return (TRUE);
-}
-#endif
-
-#if defined(_WIN32) && !defined(__CYGWIN__)
+#if defined(_WIN32)
 # include <tchar.h>
 # include <signal.h>
 # ifdef __WATCOMC__
@@ -259,6 +182,14 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 # endif
 
 # if defined(_WIN32_WINNT) && _WIN32_WINNT>=0x0333
+#  ifdef OPENSSL_SYS_WIN_CORE
+
+int OPENSSL_isservice(void)
+{
+    /* OneCore API cannot interact with GUI */
+    return 1;
+}
+#  else
 int OPENSSL_isservice(void)
 {
     HWINSTA h;
@@ -273,10 +204,14 @@ int OPENSSL_isservice(void)
 
     if (_OPENSSL_isservice.p == NULL) {
         HANDLE mod = GetModuleHandle(NULL);
+        FARPROC f = NULL;
+
         if (mod != NULL)
-            _OPENSSL_isservice.f = GetProcAddress(mod, "_OPENSSL_isservice");
-        if (_OPENSSL_isservice.p == NULL)
+            f = GetProcAddress(mod, "_OPENSSL_isservice");
+        if (f == NULL)
             _OPENSSL_isservice.p = (void *)-1;
+        else
+            _OPENSSL_isservice.f = f;
     }
 
     if (_OPENSSL_isservice.p != (void *)-1)
@@ -299,7 +234,7 @@ int OPENSSL_isservice(void)
 
     len++, len &= ~1;           /* paranoia */
     name[len / sizeof(WCHAR)] = L'\0'; /* paranoia */
-#  if 1
+#   if 1
     /*
      * This doesn't cover "interactive" services [working with real
      * WinSta0's] nor programs started non-interactively by Task Scheduler
@@ -307,14 +242,15 @@ int OPENSSL_isservice(void)
      */
     if (wcsstr(name, L"Service-0x"))
         return 1;
-#  else
+#   else
     /* This covers all non-interactive programs such as services. */
     if (!wcsstr(name, L"WinSta0"))
         return 1;
-#  endif
+#   endif
     else
         return 0;
 }
+#  endif
 # else
 int OPENSSL_isservice(void)
 {
@@ -327,7 +263,13 @@ void OPENSSL_showfatal(const char *fmta, ...)
     va_list ap;
     TCHAR buf[256];
     const TCHAR *fmt;
-# ifdef STD_ERROR_HANDLE        /* what a dirty trick! */
+    /*
+     * First check if it's a console application, in which case the
+     * error message would be printed to standard error.
+     * Windows CE does not have a concept of a console application,
+     * so we need to guard the check.
+     */
+# ifdef STD_ERROR_HANDLE
     HANDLE h;
 
     if ((h = GetStdHandle(STD_ERROR_HANDLE)) != NULL &&
@@ -405,6 +347,24 @@ void OPENSSL_showfatal(const char *fmta, ...)
     va_end(ap);
 
 # if defined(_WIN32_WINNT) && _WIN32_WINNT>=0x0333
+#  ifdef OPENSSL_SYS_WIN_CORE
+    /* ONECORE is always NONGUI and NT >= 0x0601 */
+
+    /*
+    * TODO: (For non GUI and no std error cases)
+    * Add event logging feature here.
+    */
+
+#   if !defined(NDEBUG)
+        /*
+        * We are in a situation where we tried to report a critical
+        * error and this failed for some reason. As a last resort,
+        * in debug builds, send output to the debugger or any other
+        * tool like DebugView which can monitor the output.
+        */
+        OutputDebugString(buf);
+#   endif
+#  else
     /* this -------------v--- guards NT-specific calls */
     if (check_winnt() && OPENSSL_isservice() > 0) {
         HANDLE hEventLog = RegisterEventSource(NULL, _T("OpenSSL"));
@@ -414,7 +374,7 @@ void OPENSSL_showfatal(const char *fmta, ...)
 
             if (!ReportEvent(hEventLog, EVENTLOG_ERROR_TYPE, 0, 0, NULL,
                              1, 0, &pmsg, NULL)) {
-#if defined(DEBUG)
+#   if !defined(NDEBUG)
                 /*
                  * We are in a situation where we tried to report a critical
                  * error and this failed for some reason. As a last resort,
@@ -422,14 +382,18 @@ void OPENSSL_showfatal(const char *fmta, ...)
                  * tool like DebugView which can monitor the output.
                  */
                 OutputDebugString(pmsg);
-#endif
+#   endif
             }
 
             (void)DeregisterEventSource(hEventLog);
         }
-    } else
-# endif
+    } else {
         MessageBox(NULL, buf, _T("OpenSSL: FATAL"), MB_OK | MB_ICONERROR);
+    }
+#  endif
+# else
+    MessageBox(NULL, buf, _T("OpenSSL: FATAL"), MB_OK | MB_ICONERROR);
+# endif
 }
 #else
 void OPENSSL_showfatal(const char *fmta, ...)
@@ -453,7 +417,7 @@ void OPENSSL_die(const char *message, const char *file, int line)
 {
     OPENSSL_showfatal("%s:%d: OpenSSL internal error: %s\n",
                       file, line, message);
-#if !defined(_WIN32) || defined(__CYGWIN__)
+#if !defined(_WIN32)
     abort();
 #else
     /*
@@ -466,26 +430,17 @@ void OPENSSL_die(const char *message, const char *file, int line)
 #endif
 }
 
-/* volatile unsigned char* pointers are there because
- * 1. Accessing a variable declared volatile via a pointer
- *    that lacks a volatile qualifier causes undefined behavior.
- * 2. When the variable itself is not volatile the compiler is
- *    not required to keep all those reads and can convert
- *    this into canonical memcmp() which doesn't read the whole block.
- * Pointers to volatile resolve the first problem fully. The second
- * problem cannot be resolved in any Standard-compliant way but this
- * works the problem around. Compilers typically react to
- * pointers to volatile by preserving the reads and writes through them.
- * The latter is not required by the Standard if the memory pointed to
- * is not volatile.
- * Pointers themselves are volatile in the function signature to work
- * around a subtle bug in gcc 4.6+ which causes writes through
- * pointers to volatile to not be emitted in some rare,
- * never needed in real life, pieces of code.
+#if !defined(OPENSSL_CPUID_OBJ)
+/*
+ * The volatile is used to to ensure that the compiler generates code that reads
+ * all values from the array and doesn't try to optimize this away. The standard
+ * doesn't actually require this behavior if the original data pointed to is
+ * not volatile, but compilers do this in practice anyway.
+ *
+ * There are also assembler versions of this function.
  */
-int CRYPTO_memcmp(const volatile void * volatile in_a,
-                  const volatile void * volatile in_b,
-                  size_t len)
+# undef CRYPTO_memcmp
+int CRYPTO_memcmp(const void * in_a, const void * in_b, size_t len)
 {
     size_t i;
     const volatile unsigned char *a = in_a;
@@ -497,3 +452,22 @@ int CRYPTO_memcmp(const volatile void * volatile in_a,
 
     return x;
 }
+
+/*
+ * For systems that don't provide an instruction counter register or equivalent.
+ */
+uint32_t OPENSSL_rdtsc(void)
+{
+    return 0;
+}
+
+size_t OPENSSL_instrument_bus(unsigned int *out, size_t cnt)
+{
+    return 0;
+}
+
+size_t OPENSSL_instrument_bus2(unsigned int *out, size_t cnt, size_t max)
+{
+    return 0;
+}
+#endif

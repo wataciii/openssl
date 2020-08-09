@@ -1,66 +1,10 @@
 /*
- * Written by Tom Titchener <Tom_Titchener@groove.net> for the OpenSSL
- * project.
- */
-
-/*
- * History: This file was transferred to Richard Levitte from CertCo by Kathy
- * Weinhold in mid-spring 2000 to be included in OpenSSL or released as a
- * patch kit.
- */
-
-/* ====================================================================
- * Copyright (c) 1998-2000 The OpenSSL Project.  All rights reserved.
+ * Copyright 2000-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.openssl.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    openssl-core@openssl.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.openssl.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 #include <stdio.h>
@@ -68,9 +12,12 @@
 #include <openssl/objects.h>
 #include <openssl/x509.h>
 #include <openssl/ocsp.h>
-#include "ocsp_lcl.h"
+#include "ocsp_local.h"
 #include <openssl/rand.h>
 #include <openssl/x509v3.h>
+
+DEFINE_STACK_OF(ASN1_OBJECT)
+DEFINE_STACK_OF(ACCESS_DESCRIPTION)
 
 /* Standard wrapper functions for extensions */
 
@@ -78,7 +25,7 @@
 
 int OCSP_REQUEST_get_ext_count(OCSP_REQUEST *x)
 {
-    return (X509v3_get_ext_count(x->tbsRequest.requestExtensions));
+    return X509v3_get_ext_count(x->tbsRequest.requestExtensions);
 }
 
 int OCSP_REQUEST_get_ext_by_NID(OCSP_REQUEST *x, int nid, int lastpos)
@@ -87,7 +34,7 @@ int OCSP_REQUEST_get_ext_by_NID(OCSP_REQUEST *x, int nid, int lastpos)
             (x->tbsRequest.requestExtensions, nid, lastpos));
 }
 
-int OCSP_REQUEST_get_ext_by_OBJ(OCSP_REQUEST *x, ASN1_OBJECT *obj,
+int OCSP_REQUEST_get_ext_by_OBJ(OCSP_REQUEST *x, const ASN1_OBJECT *obj,
                                 int lastpos)
 {
     return (X509v3_get_ext_by_OBJ
@@ -102,12 +49,12 @@ int OCSP_REQUEST_get_ext_by_critical(OCSP_REQUEST *x, int crit, int lastpos)
 
 X509_EXTENSION *OCSP_REQUEST_get_ext(OCSP_REQUEST *x, int loc)
 {
-    return (X509v3_get_ext(x->tbsRequest.requestExtensions, loc));
+    return X509v3_get_ext(x->tbsRequest.requestExtensions, loc);
 }
 
 X509_EXTENSION *OCSP_REQUEST_delete_ext(OCSP_REQUEST *x, int loc)
 {
-    return (X509v3_delete_ext(x->tbsRequest.requestExtensions, loc));
+    return X509v3_delete_ext(x->tbsRequest.requestExtensions, loc);
 }
 
 void *OCSP_REQUEST_get1_ext_d2i(OCSP_REQUEST *x, int nid, int *crit, int *idx)
@@ -132,17 +79,18 @@ int OCSP_REQUEST_add_ext(OCSP_REQUEST *x, X509_EXTENSION *ex, int loc)
 
 int OCSP_ONEREQ_get_ext_count(OCSP_ONEREQ *x)
 {
-    return (X509v3_get_ext_count(x->singleRequestExtensions));
+    return X509v3_get_ext_count(x->singleRequestExtensions);
 }
 
 int OCSP_ONEREQ_get_ext_by_NID(OCSP_ONEREQ *x, int nid, int lastpos)
 {
-    return (X509v3_get_ext_by_NID(x->singleRequestExtensions, nid, lastpos));
+    return X509v3_get_ext_by_NID(x->singleRequestExtensions, nid, lastpos);
 }
 
-int OCSP_ONEREQ_get_ext_by_OBJ(OCSP_ONEREQ *x, ASN1_OBJECT *obj, int lastpos)
+int OCSP_ONEREQ_get_ext_by_OBJ(OCSP_ONEREQ *x, const ASN1_OBJECT *obj,
+                               int lastpos)
 {
-    return (X509v3_get_ext_by_OBJ(x->singleRequestExtensions, obj, lastpos));
+    return X509v3_get_ext_by_OBJ(x->singleRequestExtensions, obj, lastpos);
 }
 
 int OCSP_ONEREQ_get_ext_by_critical(OCSP_ONEREQ *x, int crit, int lastpos)
@@ -153,12 +101,12 @@ int OCSP_ONEREQ_get_ext_by_critical(OCSP_ONEREQ *x, int crit, int lastpos)
 
 X509_EXTENSION *OCSP_ONEREQ_get_ext(OCSP_ONEREQ *x, int loc)
 {
-    return (X509v3_get_ext(x->singleRequestExtensions, loc));
+    return X509v3_get_ext(x->singleRequestExtensions, loc);
 }
 
 X509_EXTENSION *OCSP_ONEREQ_delete_ext(OCSP_ONEREQ *x, int loc)
 {
-    return (X509v3_delete_ext(x->singleRequestExtensions, loc));
+    return X509v3_delete_ext(x->singleRequestExtensions, loc);
 }
 
 void *OCSP_ONEREQ_get1_ext_d2i(OCSP_ONEREQ *x, int nid, int *crit, int *idx)
@@ -182,7 +130,7 @@ int OCSP_ONEREQ_add_ext(OCSP_ONEREQ *x, X509_EXTENSION *ex, int loc)
 
 int OCSP_BASICRESP_get_ext_count(OCSP_BASICRESP *x)
 {
-    return (X509v3_get_ext_count(x->tbsResponseData.responseExtensions));
+    return X509v3_get_ext_count(x->tbsResponseData.responseExtensions);
 }
 
 int OCSP_BASICRESP_get_ext_by_NID(OCSP_BASICRESP *x, int nid, int lastpos)
@@ -191,7 +139,7 @@ int OCSP_BASICRESP_get_ext_by_NID(OCSP_BASICRESP *x, int nid, int lastpos)
             (x->tbsResponseData.responseExtensions, nid, lastpos));
 }
 
-int OCSP_BASICRESP_get_ext_by_OBJ(OCSP_BASICRESP *x, ASN1_OBJECT *obj,
+int OCSP_BASICRESP_get_ext_by_OBJ(OCSP_BASICRESP *x, const ASN1_OBJECT *obj,
                                   int lastpos)
 {
     return (X509v3_get_ext_by_OBJ
@@ -207,12 +155,12 @@ int OCSP_BASICRESP_get_ext_by_critical(OCSP_BASICRESP *x, int crit,
 
 X509_EXTENSION *OCSP_BASICRESP_get_ext(OCSP_BASICRESP *x, int loc)
 {
-    return (X509v3_get_ext(x->tbsResponseData.responseExtensions, loc));
+    return X509v3_get_ext(x->tbsResponseData.responseExtensions, loc);
 }
 
 X509_EXTENSION *OCSP_BASICRESP_delete_ext(OCSP_BASICRESP *x, int loc)
 {
-    return (X509v3_delete_ext(x->tbsResponseData.responseExtensions, loc));
+    return X509v3_delete_ext(x->tbsResponseData.responseExtensions, loc);
 }
 
 void *OCSP_BASICRESP_get1_ext_d2i(OCSP_BASICRESP *x, int nid, int *crit,
@@ -239,34 +187,34 @@ int OCSP_BASICRESP_add_ext(OCSP_BASICRESP *x, X509_EXTENSION *ex, int loc)
 
 int OCSP_SINGLERESP_get_ext_count(OCSP_SINGLERESP *x)
 {
-    return (X509v3_get_ext_count(x->singleExtensions));
+    return X509v3_get_ext_count(x->singleExtensions);
 }
 
 int OCSP_SINGLERESP_get_ext_by_NID(OCSP_SINGLERESP *x, int nid, int lastpos)
 {
-    return (X509v3_get_ext_by_NID(x->singleExtensions, nid, lastpos));
+    return X509v3_get_ext_by_NID(x->singleExtensions, nid, lastpos);
 }
 
-int OCSP_SINGLERESP_get_ext_by_OBJ(OCSP_SINGLERESP *x, ASN1_OBJECT *obj,
+int OCSP_SINGLERESP_get_ext_by_OBJ(OCSP_SINGLERESP *x, const ASN1_OBJECT *obj,
                                    int lastpos)
 {
-    return (X509v3_get_ext_by_OBJ(x->singleExtensions, obj, lastpos));
+    return X509v3_get_ext_by_OBJ(x->singleExtensions, obj, lastpos);
 }
 
 int OCSP_SINGLERESP_get_ext_by_critical(OCSP_SINGLERESP *x, int crit,
                                         int lastpos)
 {
-    return (X509v3_get_ext_by_critical(x->singleExtensions, crit, lastpos));
+    return X509v3_get_ext_by_critical(x->singleExtensions, crit, lastpos);
 }
 
 X509_EXTENSION *OCSP_SINGLERESP_get_ext(OCSP_SINGLERESP *x, int loc)
 {
-    return (X509v3_get_ext(x->singleExtensions, loc));
+    return X509v3_get_ext(x->singleExtensions, loc);
 }
 
 X509_EXTENSION *OCSP_SINGLERESP_delete_ext(OCSP_SINGLERESP *x, int loc)
 {
-    return (X509v3_delete_ext(x->singleExtensions, loc));
+    return X509v3_delete_ext(x->singleExtensions, loc);
 }
 
 void *OCSP_SINGLERESP_get1_ext_d2i(OCSP_SINGLERESP *x, int nid, int *crit,
@@ -311,6 +259,9 @@ static int ocsp_add1_nonce(STACK_OF(X509_EXTENSION) **exts,
      * relies on library internals.
      */
     os.length = ASN1_object_size(0, len, V_ASN1_OCTET_STRING);
+    if (os.length < 0)
+        return 0;
+
     os.data = OPENSSL_malloc(os.length);
     if (os.data == NULL)
         goto err;
@@ -409,7 +360,7 @@ int OCSP_copy_nonce(OCSP_BASICRESP *resp, OCSP_REQUEST *req)
     return OCSP_BASICRESP_add_ext(resp, req_ext, -1);
 }
 
-X509_EXTENSION *OCSP_crlID_new(char *url, long *n, char *tim)
+X509_EXTENSION *OCSP_crlID_new(const char *url, long *n, char *tim)
 {
     X509_EXTENSION *x = NULL;
     OCSP_CRLID *cid = NULL;
@@ -482,7 +433,7 @@ X509_EXTENSION *OCSP_archive_cutoff_new(char *tim)
  * two--NID_ad_ocsp, NID_id_ad_caIssuers--and GeneralName value.  This method
  * forces NID_ad_ocsp and uniformResourceLocator [6] IA5String.
  */
-X509_EXTENSION *OCSP_url_svcloc_new(X509_NAME *issuer, char **urls)
+X509_EXTENSION *OCSP_url_svcloc_new(const X509_NAME *issuer, const char **urls)
 {
     X509_EXTENSION *x = NULL;
     ASN1_IA5STRING *ia5 = NULL;
@@ -491,6 +442,7 @@ X509_EXTENSION *OCSP_url_svcloc_new(X509_NAME *issuer, char **urls)
 
     if ((sloc = OCSP_SERVICELOC_new()) == NULL)
         goto err;
+    X509_NAME_free(sloc->issuer);
     if ((sloc->issuer = X509_NAME_dup(issuer)) == NULL)
         goto err;
     if (urls && *urls
@@ -501,20 +453,23 @@ X509_EXTENSION *OCSP_url_svcloc_new(X509_NAME *issuer, char **urls)
             goto err;
         if ((ad->method = OBJ_nid2obj(NID_ad_OCSP)) == NULL)
             goto err;
-        if ((ad->location = GENERAL_NAME_new()) == NULL)
-            goto err;
         if ((ia5 = ASN1_IA5STRING_new()) == NULL)
             goto err;
         if (!ASN1_STRING_set((ASN1_STRING *)ia5, *urls, -1))
             goto err;
+        /* ad->location is allocated inside ACCESS_DESCRIPTION_new */
         ad->location->type = GEN_URI;
         ad->location->d.ia5 = ia5;
+        ia5 = NULL;
         if (!sk_ACCESS_DESCRIPTION_push(sloc->locator, ad))
             goto err;
+        ad = NULL;
         urls++;
     }
     x = X509V3_EXT_i2d(NID_id_pkix_OCSP_serviceLocator, 0, sloc);
  err:
+    ASN1_IA5STRING_free(ia5);
+    ACCESS_DESCRIPTION_free(ad);
     OCSP_SERVICELOC_free(sloc);
     return x;
 }

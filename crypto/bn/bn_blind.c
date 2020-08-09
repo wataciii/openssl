@@ -1,117 +1,15 @@
-/* ====================================================================
- * Copyright (c) 1998-2006 The OpenSSL Project.  All rights reserved.
+/*
+ * Copyright 1998-2018 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.openssl.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    openssl-core@openssl.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.openssl.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
- */
-/* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
- * All rights reserved.
- *
- * This package is an SSL implementation written
- * by Eric Young (eay@cryptsoft.com).
- * The implementation was written so as to conform with Netscapes SSL.
- *
- * This library is free for commercial and non-commercial use as long as
- * the following conditions are aheared to.  The following conditions
- * apply to all code found in this distribution, be it the RC4, RSA,
- * lhash, DES, etc., code; not just the SSL code.  The SSL documentation
- * included with this distribution is covered by the same copyright terms
- * except that the holder is Tim Hudson (tjh@cryptsoft.com).
- *
- * Copyright remains Eric Young's, and as such any Copyright notices in
- * the code are not to be removed.
- * If this package is used in a product, Eric Young should be given attribution
- * as the author of the parts of the library used.
- * This can be in the form of a textual message at program startup or
- * in documentation (online or textual) provided with the package.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. All advertising materials mentioning features or use of this software
- *    must display the following acknowledgement:
- *    "This product includes cryptographic software written by
- *     Eric Young (eay@cryptsoft.com)"
- *    The word 'cryptographic' can be left out if the rouines from the library
- *    being used are not cryptographic related :-).
- * 4. If you include any Windows specific code (or a derivative thereof) from
- *    the apps directory (application code) you must include an acknowledgement:
- *    "This product includes software written by Tim Hudson (tjh@cryptsoft.com)"
- *
- * THIS SOFTWARE IS PROVIDED BY ERIC YOUNG ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- *
- * The licence and distribution terms for any publically available version or
- * derivative of this code cannot be changed.  i.e. this code cannot simply be
- * copied and put under another distribution licence
- * [including the GNU Public Licence.]
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 #include <openssl/opensslconf.h>
 #include "internal/cryptlib.h"
-#include "internal/threads.h"
-#include "bn_lcl.h"
+#include "bn_local.h"
 
 #define BN_BLINDING_COUNTER     32
 
@@ -184,7 +82,6 @@ void BN_BLINDING_free(BN_BLINDING *r)
 {
     if (r == NULL)
         return;
-
     BN_free(r->A);
     BN_free(r->Ai);
     BN_free(r->e);
@@ -211,17 +108,22 @@ int BN_BLINDING_update(BN_BLINDING *b, BN_CTX *ctx)
         if (!BN_BLINDING_create_param(b, NULL, NULL, ctx, NULL, NULL))
             goto err;
     } else if (!(b->flags & BN_BLINDING_NO_UPDATE)) {
-        if (!BN_mod_mul(b->A, b->A, b->A, b->mod, ctx))
-            goto err;
-        if (!BN_mod_mul(b->Ai, b->Ai, b->Ai, b->mod, ctx))
-            goto err;
+        if (b->m_ctx != NULL) {
+            if (!bn_mul_mont_fixed_top(b->Ai, b->Ai, b->Ai, b->m_ctx, ctx)
+                || !bn_mul_mont_fixed_top(b->A, b->A, b->A, b->m_ctx, ctx))
+                goto err;
+        } else {
+            if (!BN_mod_mul(b->Ai, b->Ai, b->Ai, b->mod, ctx)
+                || !BN_mod_mul(b->A, b->A, b->A, b->mod, ctx))
+                goto err;
+        }
     }
 
     ret = 1;
  err:
     if (b->counter == BN_BLINDING_COUNTER)
         b->counter = 0;
-    return (ret);
+    return ret;
 }
 
 int BN_BLINDING_convert(BIGNUM *n, BN_BLINDING *b, BN_CTX *ctx)
@@ -237,22 +139,22 @@ int BN_BLINDING_convert_ex(BIGNUM *n, BIGNUM *r, BN_BLINDING *b, BN_CTX *ctx)
 
     if ((b->A == NULL) || (b->Ai == NULL)) {
         BNerr(BN_F_BN_BLINDING_CONVERT_EX, BN_R_NOT_INITIALIZED);
-        return (0);
+        return 0;
     }
 
     if (b->counter == -1)
         /* Fresh blinding, doesn't need updating. */
         b->counter = 0;
     else if (!BN_BLINDING_update(b, ctx))
-        return (0);
+        return 0;
 
-    if (r != NULL) {
-        if (!BN_copy(r, b->Ai))
-            ret = 0;
-    }
+    if (r != NULL && (BN_copy(r, b->Ai) == NULL))
+        return 0;
 
-    if (!BN_mod_mul(n, n, b->A, b->mod, ctx))
-        ret = 0;
+    if (b->m_ctx != NULL)
+        ret = BN_mod_mul_montgomery(n, n, b->A, b->m_ctx, ctx);
+    else
+        ret = BN_mod_mul(n, n, b->A, b->mod, ctx);
 
     return ret;
 }
@@ -269,18 +171,33 @@ int BN_BLINDING_invert_ex(BIGNUM *n, const BIGNUM *r, BN_BLINDING *b,
 
     bn_check_top(n);
 
-    if (r != NULL)
-        ret = BN_mod_mul(n, n, r, b->mod, ctx);
-    else {
-        if (b->Ai == NULL) {
-            BNerr(BN_F_BN_BLINDING_INVERT_EX, BN_R_NOT_INITIALIZED);
-            return (0);
+    if (r == NULL && (r = b->Ai) == NULL) {
+        BNerr(BN_F_BN_BLINDING_INVERT_EX, BN_R_NOT_INITIALIZED);
+        return 0;
+    }
+
+    if (b->m_ctx != NULL) {
+        /* ensure that BN_mod_mul_montgomery takes pre-defined path */
+        if (n->dmax >= r->top) {
+            size_t i, rtop = r->top, ntop = n->top;
+            BN_ULONG mask;
+
+            for (i = 0; i < rtop; i++) {
+                mask = (BN_ULONG)0 - ((i - ntop) >> (8 * sizeof(i) - 1));
+                n->d[i] &= mask;
+            }
+            mask = (BN_ULONG)0 - ((rtop - ntop) >> (8 * sizeof(ntop) - 1));
+            /* always true, if (rtop >= ntop) n->top = r->top; */
+            n->top = (int)(rtop & ~mask) | (ntop & mask);
+            n->flags |= (BN_FLG_FIXED_TOP & ~mask);
         }
-        ret = BN_mod_mul(n, n, b->Ai, b->mod, ctx);
+        ret = BN_mod_mul_montgomery(n, n, r, b->m_ctx, ctx);
+    } else {
+        ret = BN_mod_mul(n, n, r, b->mod, ctx);
     }
 
     bn_check_top(n);
-    return (ret);
+    return ret;
 }
 
 int BN_BLINDING_is_current_thread(BN_BLINDING *b)
@@ -353,30 +270,34 @@ BN_BLINDING *BN_BLINDING_create_param(BN_BLINDING *b,
 
     do {
         int rv;
-        if (!BN_rand_range(ret->A, ret->mod))
+        if (!BN_priv_rand_range_ex(ret->A, ret->mod, ctx))
             goto err;
-        if (!int_bn_mod_inverse(ret->Ai, ret->A, ret->mod, ctx, &rv)) {
-            /*
-             * this should almost never happen for good RSA keys
-             */
-            if (rv) {
-                if (retry_counter-- == 0) {
-                    BNerr(BN_F_BN_BLINDING_CREATE_PARAM,
-                          BN_R_TOO_MANY_ITERATIONS);
-                    goto err;
-                }
-            } else
-                goto err;
-        } else
+        if (int_bn_mod_inverse(ret->Ai, ret->A, ret->mod, ctx, &rv))
             break;
+
+        /*
+         * this should almost never happen for good RSA keys
+         */
+        if (!rv)
+            goto err;
+
+        if (retry_counter-- == 0) {
+            BNerr(BN_F_BN_BLINDING_CREATE_PARAM, BN_R_TOO_MANY_ITERATIONS);
+            goto err;
+        }
     } while (1);
 
     if (ret->bn_mod_exp != NULL && ret->m_ctx != NULL) {
-        if (!ret->bn_mod_exp
-            (ret->A, ret->A, ret->e, ret->mod, ctx, ret->m_ctx))
+        if (!ret->bn_mod_exp(ret->A, ret->A, ret->e, ret->mod, ctx, ret->m_ctx))
             goto err;
     } else {
         if (!BN_mod_exp(ret->A, ret->A, ret->e, ret->mod, ctx))
+            goto err;
+    }
+
+    if (ret->m_ctx != NULL) {
+        if (!bn_to_mont_fixed_top(ret->Ai, ret->Ai, ret->m_ctx, ctx)
+            || !bn_to_mont_fixed_top(ret->A, ret->A, ret->m_ctx, ctx))
             goto err;
     }
 

@@ -1,57 +1,19 @@
-/* ====================================================================
- * Copyright (c) 2011-2013 The OpenSSL Project.  All rights reserved.
+/*
+ * Copyright 2015-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 /* Adapted from the public domain code by D. Bernstein from SUPERCOP. */
 
 #include <string.h>
 
-#include "internal/chacha.h"
+#include "internal/endian.h"
+#include "crypto/chacha.h"
+#include "crypto/ctype.h"
 
 typedef unsigned int u32;
 typedef unsigned char u8;
@@ -82,10 +44,7 @@ static void chacha20_core(chacha_buf *output, const u32 input[16])
 {
     u32 x[16];
     int i;
-    const union {
-        long one;
-        char little;
-    } is_endian = { 1 };
+    DECLARE_IS_ENDIAN;
 
     memcpy(x, input, sizeof(x));
 
@@ -100,7 +59,7 @@ static void chacha20_core(chacha_buf *output, const u32 input[16])
         QUARTERROUND(3, 4, 9, 14);
     }
 
-    if (is_endian.little) {
+    if (IS_LITTLE_ENDIAN) {
         for (i = 0; i < 16; ++i)
             output->u[i] = x[i] + input[i];
     } else {
@@ -118,10 +77,18 @@ void ChaCha20_ctr32(unsigned char *out, const unsigned char *inp,
     size_t todo, i;
 
     /* sigma constant "expand 32-byte k" in little-endian encoding */
-    input[0] = ((u32)'e') | ((u32)'x'<<8) | ((u32)'p'<<16) | ((u32)'a'<<24);
-    input[1] = ((u32)'n') | ((u32)'d'<<8) | ((u32)' '<<16) | ((u32)'3'<<24);
-    input[2] = ((u32)'2') | ((u32)'-'<<8) | ((u32)'b'<<16) | ((u32)'y'<<24);
-    input[3] = ((u32)'t') | ((u32)'e'<<8) | ((u32)' '<<16) | ((u32)'k'<<24);
+    input[0] = ((u32)ossl_toascii('e')) | ((u32)ossl_toascii('x') << 8)
+               | ((u32)ossl_toascii('p') << 16)
+               | ((u32)ossl_toascii('a') << 24);
+    input[1] = ((u32)ossl_toascii('n')) | ((u32)ossl_toascii('d') << 8)
+               | ((u32)ossl_toascii(' ') << 16)
+               | ((u32)ossl_toascii('3') << 24);
+    input[2] = ((u32)ossl_toascii('2')) | ((u32)ossl_toascii('-') << 8)
+               | ((u32)ossl_toascii('b') << 16)
+               | ((u32)ossl_toascii('y') << 24);
+    input[3] = ((u32)ossl_toascii('t')) | ((u32)ossl_toascii('e') << 8)
+               | ((u32)ossl_toascii(' ') << 16)
+               | ((u32)ossl_toascii('k') << 24);
 
     input[4] = key[0];
     input[5] = key[1];
@@ -150,8 +117,12 @@ void ChaCha20_ctr32(unsigned char *out, const unsigned char *inp,
         inp += todo;
         len -= todo;
 
-        /* advance counter */
-        if (++input[12] == 0)
-            input[13]++;
+        /*
+         * Advance 32-bit counter. Note that as subroutine is so to
+         * say nonce-agnostic, this limited counter width doesn't
+         * prevent caller from implementing wider counter. It would
+         * simply take two calls split on counter overflow...
+         */
+        input[12]++;
     }
 }

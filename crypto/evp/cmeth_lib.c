@@ -1,70 +1,28 @@
 /*
- * Written by Richard Levitte (levitte@openssl.org) for the OpenSSL project
- * 2015.
+ * Copyright 2015-2020 The OpenSSL Project Authors. All Rights Reserved.
+ *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
-/* ====================================================================
- * Copyright (c) 2015 The OpenSSL Project.  All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+
+/*
+ * EVP _meth_ APIs are deprecated for public use, but still ok for
+ * internal use.
  */
+#include "internal/deprecated.h"
 
 #include <string.h>
 
 #include <openssl/evp.h>
-#include "internal/evp_int.h"
-#include "evp_locl.h"
+#include "crypto/evp.h"
+#include "internal/provider.h"
+#include "evp_local.h"
 
 EVP_CIPHER *EVP_CIPHER_meth_new(int cipher_type, int block_size, int key_len)
 {
-    EVP_CIPHER *cipher = OPENSSL_zalloc(sizeof(EVP_CIPHER));
+    EVP_CIPHER *cipher = evp_cipher_new();
 
     if (cipher != NULL) {
         cipher->nid = cipher_type;
@@ -76,33 +34,53 @@ EVP_CIPHER *EVP_CIPHER_meth_new(int cipher_type, int block_size, int key_len)
 
 EVP_CIPHER *EVP_CIPHER_meth_dup(const EVP_CIPHER *cipher)
 {
-    EVP_CIPHER *to = EVP_CIPHER_meth_new(cipher->nid, cipher->block_size,
-                                         cipher->key_len);
+    EVP_CIPHER *to = NULL;
 
-    if (to != NULL)
+    /*
+     * Non-legacy EVP_CIPHERs can't be duplicated like this.
+     * Use EVP_CIPHER_up_ref() instead.
+     */
+    if (cipher->prov != NULL)
+        return NULL;
+
+    if ((to = EVP_CIPHER_meth_new(cipher->nid, cipher->block_size,
+                                  cipher->key_len)) != NULL) {
+        CRYPTO_RWLOCK *lock = to->lock;
+
         memcpy(to, cipher, sizeof(*to));
+        to->lock = lock;
+    }
     return to;
 }
 
 void EVP_CIPHER_meth_free(EVP_CIPHER *cipher)
 {
-    OPENSSL_free(cipher);
+    EVP_CIPHER_free(cipher);
 }
 
 int EVP_CIPHER_meth_set_iv_length(EVP_CIPHER *cipher, int iv_len)
 {
+    if (cipher->iv_len != 0)
+        return 0;
+
     cipher->iv_len = iv_len;
     return 1;
 }
 
 int EVP_CIPHER_meth_set_flags(EVP_CIPHER *cipher, unsigned long flags)
 {
+    if (cipher->flags != 0)
+        return 0;
+
     cipher->flags = flags;
     return 1;
 }
 
 int EVP_CIPHER_meth_set_impl_ctx_size(EVP_CIPHER *cipher, int ctx_size)
 {
+    if (cipher->ctx_size != 0)
+        return 0;
+
     cipher->ctx_size = ctx_size;
     return 1;
 }
@@ -113,6 +91,9 @@ int EVP_CIPHER_meth_set_init(EVP_CIPHER *cipher,
                                           const unsigned char *iv,
                                           int enc))
 {
+    if (cipher->init != NULL)
+        return 0;
+
     cipher->init = init;
     return 1;
 }
@@ -123,6 +104,9 @@ int EVP_CIPHER_meth_set_do_cipher(EVP_CIPHER *cipher,
                                                     const unsigned char *in,
                                                     size_t inl))
 {
+    if (cipher->do_cipher != NULL)
+        return 0;
+
     cipher->do_cipher = do_cipher;
     return 1;
 }
@@ -130,6 +114,9 @@ int EVP_CIPHER_meth_set_do_cipher(EVP_CIPHER *cipher,
 int EVP_CIPHER_meth_set_cleanup(EVP_CIPHER *cipher,
                                 int (*cleanup) (EVP_CIPHER_CTX *))
 {
+    if (cipher->cleanup != NULL)
+        return 0;
+
     cipher->cleanup = cleanup;
     return 1;
 }
@@ -138,6 +125,9 @@ int EVP_CIPHER_meth_set_set_asn1_params(EVP_CIPHER *cipher,
                                         int (*set_asn1_parameters) (EVP_CIPHER_CTX *,
                                                                     ASN1_TYPE *))
 {
+    if (cipher->set_asn1_parameters != NULL)
+        return 0;
+
     cipher->set_asn1_parameters = set_asn1_parameters;
     return 1;
 }
@@ -146,6 +136,9 @@ int EVP_CIPHER_meth_set_get_asn1_params(EVP_CIPHER *cipher,
                                         int (*get_asn1_parameters) (EVP_CIPHER_CTX *,
                                                                     ASN1_TYPE *))
 {
+    if (cipher->get_asn1_parameters != NULL)
+        return 0;
+
     cipher->get_asn1_parameters = get_asn1_parameters;
     return 1;
 }
@@ -154,6 +147,9 @@ int EVP_CIPHER_meth_set_ctrl(EVP_CIPHER *cipher,
                              int (*ctrl) (EVP_CIPHER_CTX *, int type,
                                           int arg, void *ptr))
 {
+    if (cipher->ctrl != NULL)
+        return 0;
+
     cipher->ctrl = ctrl;
     return 1;
 }

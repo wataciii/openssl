@@ -1,61 +1,23 @@
 /*
- * Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL
- * project.
+ * Copyright 2015-2020 The OpenSSL Project Authors. All Rights Reserved.
+ *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
-/* ====================================================================
- * Copyright (c) 2015 The OpenSSL Project.  All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
+
+/*
+ * ECDH and ECDSA low level APIs are deprecated for public use, but still ok
+ * for internal use.
  */
+#include "internal/deprecated.h"
 
 #include <string.h>
 #include <openssl/ec.h>
 #include <openssl/engine.h>
 #include <openssl/err.h>
-#include "ec_lcl.h"
+#include "ec_local.h"
 
 
 static const EC_KEY_METHOD openssl_ec_key_method = {
@@ -103,7 +65,7 @@ int EC_KEY_set_method(EC_KEY *key, const EC_KEY_METHOD *meth)
     if (finish != NULL)
         finish(key);
 
-#ifndef OPENSSL_NO_ENGINE
+#if !defined(OPENSSL_NO_ENGINE) && !defined(FIPS_MODULE)
     ENGINE_finish(key->engine);
     key->engine = NULL;
 #endif
@@ -114,36 +76,38 @@ int EC_KEY_set_method(EC_KEY *key, const EC_KEY_METHOD *meth)
     return 1;
 }
 
-EC_KEY *EC_KEY_new_method(ENGINE *engine)
+EC_KEY *ec_key_new_method_int(OPENSSL_CTX *libctx, const char *propq,
+                              ENGINE *engine)
 {
     EC_KEY *ret = OPENSSL_zalloc(sizeof(*ret));
 
     if (ret == NULL) {
-        ECerr(EC_F_EC_KEY_NEW_METHOD, ERR_R_MALLOC_FAILURE);
-        return NULL;
-    }
-    if (!CRYPTO_new_ex_data(CRYPTO_EX_INDEX_EC_KEY, ret, &ret->ex_data)) {
-        OPENSSL_free(ret);
+        ECerr(EC_F_EC_KEY_NEW_METHOD_INT, ERR_R_MALLOC_FAILURE);
         return NULL;
     }
 
+    ret->libctx = libctx;
+    if (propq != NULL) {
+        ret->propq = OPENSSL_strdup(propq);
+        if (ret->propq == NULL) {
+            ECerr(EC_F_EC_KEY_NEW_METHOD_INT, ERR_R_MALLOC_FAILURE);
+            goto err;
+        }
+    }
+
+    ret->references = 1;
     ret->lock = CRYPTO_THREAD_lock_new();
     if (ret->lock == NULL) {
-        ECerr(EC_F_EC_KEY_NEW_METHOD, ERR_R_MALLOC_FAILURE);
-        CRYPTO_free_ex_data(CRYPTO_EX_INDEX_EC_KEY, ret, &ret->ex_data);
-        OPENSSL_free(ret);
-        return NULL;
+        ECerr(EC_F_EC_KEY_NEW_METHOD_INT, ERR_R_MALLOC_FAILURE);
+        goto err;
     }
 
     ret->meth = EC_KEY_get_default_method();
-#ifndef OPENSSL_NO_ENGINE
+#if !defined(OPENSSL_NO_ENGINE) && !defined(FIPS_MODULE)
     if (engine != NULL) {
         if (!ENGINE_init(engine)) {
-            ECerr(EC_F_EC_KEY_NEW_METHOD, ERR_R_ENGINE_LIB);
-            CRYPTO_free_ex_data(CRYPTO_EX_INDEX_EC_KEY, ret, &ret->ex_data);
-            CRYPTO_THREAD_lock_free(ret->lock);
-            OPENSSL_free(ret);
-            return NULL;
+            ECerr(EC_F_EC_KEY_NEW_METHOD_INT, ERR_R_ENGINE_LIB);
+            goto err;
         }
         ret->engine = engine;
     } else
@@ -151,26 +115,39 @@ EC_KEY *EC_KEY_new_method(ENGINE *engine)
     if (ret->engine != NULL) {
         ret->meth = ENGINE_get_EC(ret->engine);
         if (ret->meth == NULL) {
-            ECerr(EC_F_EC_KEY_NEW_METHOD, ERR_R_ENGINE_LIB);
-            ENGINE_finish(ret->engine);
-            CRYPTO_free_ex_data(CRYPTO_EX_INDEX_EC_KEY, ret, &ret->ex_data);
-            CRYPTO_THREAD_lock_free(ret->lock);
-            OPENSSL_free(ret);
-            return NULL;
+            ECerr(EC_F_EC_KEY_NEW_METHOD_INT, ERR_R_ENGINE_LIB);
+            goto err;
         }
     }
 #endif
 
     ret->version = 1;
     ret->conv_form = POINT_CONVERSION_UNCOMPRESSED;
-    ret->references = 1;
+
+/* No ex_data inside the FIPS provider */
+#ifndef FIPS_MODULE
+    if (!CRYPTO_new_ex_data(CRYPTO_EX_INDEX_EC_KEY, ret, &ret->ex_data)) {
+        goto err;
+    }
+#endif
 
     if (ret->meth->init != NULL && ret->meth->init(ret) == 0) {
-        EC_KEY_free(ret);
-        return NULL;
+        ECerr(EC_F_EC_KEY_NEW_METHOD_INT, ERR_R_INIT_FAIL);
+        goto err;
     }
     return ret;
+
+ err:
+    EC_KEY_free(ret);
+    return NULL;
 }
+
+#ifndef FIPS_MODULE
+EC_KEY *EC_KEY_new_method(ENGINE *engine)
+{
+    return ec_key_new_method_int(NULL, NULL, engine);
+}
+#endif
 
 int ECDH_compute_key(void *out, size_t outlen, const EC_POINT *pub_key,
                      const EC_KEY *eckey,
@@ -284,7 +261,7 @@ void EC_KEY_METHOD_set_verify(EC_KEY_METHOD *meth,
     meth->verify_sig = verify_sig;
 }
 
-void EC_KEY_METHOD_get_init(EC_KEY_METHOD *meth,
+void EC_KEY_METHOD_get_init(const EC_KEY_METHOD *meth,
                             int (**pinit)(EC_KEY *key),
                             void (**pfinish)(EC_KEY *key),
                             int (**pcopy)(EC_KEY *dest, const EC_KEY *src),
@@ -309,14 +286,14 @@ void EC_KEY_METHOD_get_init(EC_KEY_METHOD *meth,
         *pset_public = meth->set_public;
 }
 
-void EC_KEY_METHOD_get_keygen(EC_KEY_METHOD *meth,
+void EC_KEY_METHOD_get_keygen(const EC_KEY_METHOD *meth,
                               int (**pkeygen)(EC_KEY *key))
 {
     if (pkeygen != NULL)
         *pkeygen = meth->keygen;
 }
 
-void EC_KEY_METHOD_get_compute_key(EC_KEY_METHOD *meth,
+void EC_KEY_METHOD_get_compute_key(const EC_KEY_METHOD *meth,
                                    int (**pck)(unsigned char **pout,
                                                size_t *poutlen,
                                                const EC_POINT *pub_key,
@@ -326,7 +303,7 @@ void EC_KEY_METHOD_get_compute_key(EC_KEY_METHOD *meth,
         *pck = meth->compute_key;
 }
 
-void EC_KEY_METHOD_get_sign(EC_KEY_METHOD *meth,
+void EC_KEY_METHOD_get_sign(const EC_KEY_METHOD *meth,
                             int (**psign)(int type, const unsigned char *dgst,
                                           int dlen, unsigned char *sig,
                                           unsigned int *siglen,
@@ -348,7 +325,7 @@ void EC_KEY_METHOD_get_sign(EC_KEY_METHOD *meth,
         *psign_sig = meth->sign_sig;
 }
 
-void EC_KEY_METHOD_get_verify(EC_KEY_METHOD *meth,
+void EC_KEY_METHOD_get_verify(const EC_KEY_METHOD *meth,
                               int (**pverify)(int type, const unsigned
                                               char *dgst, int dgst_len,
                                               const unsigned char *sigbuf,

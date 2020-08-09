@@ -1,58 +1,14 @@
-/* ====================================================================
- * Copyright (c) 1998-2001 The OpenSSL Project.  All rights reserved.
+/*
+ * Copyright 1998-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.openssl.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    openssl-core@openssl.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.openssl.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 #include "apps.h"
+#include "progs.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -64,28 +20,37 @@
 
 typedef enum OPTION_choice {
     OPT_ERR = -1, OPT_EOF = 0, OPT_HELP,
-    OPT_OUT, OPT_ENGINE, OPT_RAND, OPT_BASE64, OPT_HEX
+    OPT_OUT, OPT_ENGINE, OPT_BASE64, OPT_HEX,
+    OPT_R_ENUM, OPT_PROV_ENUM
 } OPTION_CHOICE;
 
-OPTIONS rand_options[] = {
-    {OPT_HELP_STR, 1, '-', "Usage: %s [flags] num\n"},
-    {OPT_HELP_STR, 1, '-', "Valid options are:\n"},
+const OPTIONS rand_options[] = {
+    {OPT_HELP_STR, 1, '-', "Usage: %s [options] num\n"},
+
+    OPT_SECTION("General"),
     {"help", OPT_HELP, '-', "Display this summary"},
-    {"out", OPT_OUT, '>', "Output file"},
-    {"rand", OPT_RAND, 's',
-     "Load the file(s) into the random number generator"},
-    {"base64", OPT_BASE64, '-', "Base64 encode output"},
-    {"hex", OPT_HEX, '-', "Hex encode output"},
 #ifndef OPENSSL_NO_ENGINE
     {"engine", OPT_ENGINE, 's', "Use engine, possibly a hardware device"},
 #endif
+
+    OPT_SECTION("Output"),
+    {"out", OPT_OUT, '>', "Output file"},
+    {"base64", OPT_BASE64, '-', "Base64 encode output"},
+    {"hex", OPT_HEX, '-', "Hex encode output"},
+
+    OPT_R_OPTIONS,
+    OPT_PROV_OPTIONS,
+
+    OPT_PARAMETERS(),
+    {"num", 0, 0, "Number of bytes to generate"},
     {NULL}
 };
 
 int rand_main(int argc, char **argv)
 {
+    ENGINE *e = NULL;
     BIO *out = NULL;
-    char *inrand = NULL, *outfile = NULL, *prog;
+    char *outfile = NULL, *prog;
     OPTION_CHOICE o;
     int format = FORMAT_BINARY, i, num = -1, r, ret = 1;
 
@@ -105,10 +70,11 @@ int rand_main(int argc, char **argv)
             outfile = opt_arg();
             break;
         case OPT_ENGINE:
-            (void)setup_engine(opt_arg(), 0);
+            e = setup_engine(opt_arg(), 0);
             break;
-        case OPT_RAND:
-            inrand = opt_arg();
+        case OPT_R_CASES:
+            if (!opt_rand(o))
+                goto end;
             break;
         case OPT_BASE64:
             format = FORMAT_BASE64;
@@ -116,18 +82,21 @@ int rand_main(int argc, char **argv)
         case OPT_HEX:
             format = FORMAT_TEXT;
             break;
+        case OPT_PROV_CASES:
+            if (!opt_provider(o))
+                goto end;
+            break;
         }
     }
     argc = opt_num_rest();
     argv = opt_rest();
-
-    if (argc != 1 || !opt_int(argv[0], &num) || num < 0)
+    if (argc == 1) {
+        if (!opt_int(argv[0], &num) || num <= 0)
+            goto end;
+    } else if (argc > 0) {
+        BIO_printf(bio_err, "Extra arguments given.\n");
         goto opthelp;
-
-    app_RAND_load_file(NULL, (inrand != NULL));
-    if (inrand != NULL)
-        BIO_printf(bio_err, "%ld semi-random bytes loaded\n",
-                   app_RAND_load_files(inrand));
+    }
 
     out = bio_open_default(outfile, 'w', format);
     if (out == NULL)
@@ -146,26 +115,31 @@ int rand_main(int argc, char **argv)
 
         chunk = num;
         if (chunk > (int)sizeof(buf))
-            chunk = sizeof buf;
+            chunk = sizeof(buf);
         r = RAND_bytes(buf, chunk);
         if (r <= 0)
             goto end;
-        if (format != FORMAT_TEXT) /* hex */
-            BIO_write(out, buf, chunk);
-        else {
+        if (format != FORMAT_TEXT) {
+            if (BIO_write(out, buf, chunk) != chunk)
+                goto end;
+        } else {
             for (i = 0; i < chunk; i++)
-                BIO_printf(out, "%02x", buf[i]);
+                if (BIO_printf(out, "%02x", buf[i]) != 2)
+                    goto end;
         }
         num -= chunk;
     }
     if (format == FORMAT_TEXT)
         BIO_puts(out, "\n");
-    (void)BIO_flush(out);
+    if (BIO_flush(out) <= 0)
+        goto end;
 
-    app_RAND_write_file(NULL);
     ret = 0;
 
  end:
+    if (ret != 0)
+        ERR_print_errors(bio_err);
+    release_engine(e);
     BIO_free_all(out);
-    return (ret);
+    return ret;
 }

@@ -1,62 +1,18 @@
-/* ====================================================================
- * Copyright (c) 2015 The OpenSSL Project.  All rights reserved.
+/*
+ * Copyright 2016-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.openssl.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    openssl-core@openssl.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.openssl.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
 
-#include "bio_lcl.h"
+#include "bio_local.h"
+#include "internal/ktls.h"
 
 #include <openssl/err.h>
 
@@ -91,10 +47,22 @@ int BIO_socket(int domain, int socktype, int protocol, int options)
 
     sock = socket(domain, socktype, protocol);
     if (sock == -1) {
-        SYSerr(SYS_F_SOCKET, get_last_socket_error());
+        ERR_raise_data(ERR_LIB_SYS, get_last_socket_error(),
+                       "calling socket()");
         BIOerr(BIO_F_BIO_SOCKET, BIO_R_UNABLE_TO_CREATE_SOCKET);
         return INVALID_SOCKET;
     }
+# ifndef OPENSSL_NO_KTLS
+    {
+        /*
+         * The new socket is created successfully regardless of ktls_enable.
+         * ktls_enable doesn't change any functionality of the socket, except
+         * changing the setsockopt to enable the processing of ktls_start.
+         * Thus, it is not a problem to call it for non-TLS sockets.
+         */
+        ktls_enable(sock);
+    }
+# endif
 
     return sock;
 }
@@ -114,14 +82,14 @@ int BIO_socket(int domain, int socktype, int protocol, int options)
  *
  * options holds BIO socket options that can be used
  * You should call this for every address returned by BIO_lookup
- * until the connection is succesful.
+ * until the connection is successful.
  *
  * Returns 1 on success or 0 on failure.  On failure errno is set
  * and an error status is added to the OpenSSL error stack.
  */
 int BIO_connect(int sock, const BIO_ADDR *addr, int options)
 {
-    int on = 1;
+    const int on = 1;
 
     if (sock == -1) {
         BIOerr(BIO_F_BIO_CONNECT, BIO_R_INVALID_SOCKET);
@@ -132,16 +100,20 @@ int BIO_connect(int sock, const BIO_ADDR *addr, int options)
         return 0;
 
     if (options & BIO_SOCK_KEEPALIVE) {
-        if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on)) != 0) {
-            SYSerr(SYS_F_SETSOCKOPT, get_last_socket_error());
+        if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE,
+                       (const void *)&on, sizeof(on)) != 0) {
+            ERR_raise_data(ERR_LIB_SYS, get_last_socket_error(),
+                           "calling setsockopt()");
             BIOerr(BIO_F_BIO_CONNECT, BIO_R_UNABLE_TO_KEEPALIVE);
             return 0;
         }
     }
 
     if (options & BIO_SOCK_NODELAY) {
-        if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on)) != 0) {
-            SYSerr(SYS_F_SETSOCKOPT, get_last_socket_error());
+        if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
+                       (const void *)&on, sizeof(on)) != 0) {
+            ERR_raise_data(ERR_LIB_SYS, get_last_socket_error(),
+                           "calling setsockopt()");
             BIOerr(BIO_F_BIO_CONNECT, BIO_R_UNABLE_TO_NODELAY);
             return 0;
         }
@@ -150,11 +122,65 @@ int BIO_connect(int sock, const BIO_ADDR *addr, int options)
     if (connect(sock, BIO_ADDR_sockaddr(addr),
                 BIO_ADDR_sockaddr_size(addr)) == -1) {
         if (!BIO_sock_should_retry(-1)) {
-            SYSerr(SYS_F_CONNECT, get_last_socket_error());
+            ERR_raise_data(ERR_LIB_SYS, get_last_socket_error(),
+                           "calling connect()");
             BIOerr(BIO_F_BIO_CONNECT, BIO_R_CONNECT_ERROR);
         }
         return 0;
     }
+    return 1;
+}
+
+/*-
+ * BIO_bind - bind socket to address
+ * @sock: the socket to set
+ * @addr: local address to bind to
+ * @options: BIO socket options
+ *
+ * Binds to the address using the given socket and options.
+ *
+ * Options can be a combination of the following:
+ * - BIO_SOCK_REUSEADDR: Try to reuse the address and port combination
+ *   for a recently closed port.
+ *
+ * When restarting the program it could be that the port is still in use.  If
+ * you set to BIO_SOCK_REUSEADDR option it will try to reuse the port anyway.
+ * It's recommended that you use this.
+ */
+int BIO_bind(int sock, const BIO_ADDR *addr, int options)
+{
+# ifndef OPENSSL_SYS_WINDOWS
+    int on = 1;
+# endif
+
+    if (sock == -1) {
+        BIOerr(BIO_F_BIO_BIND, BIO_R_INVALID_SOCKET);
+        return 0;
+    }
+
+# ifndef OPENSSL_SYS_WINDOWS
+    /*
+     * SO_REUSEADDR has different behavior on Windows than on
+     * other operating systems, don't set it there.
+     */
+    if (options & BIO_SOCK_REUSEADDR) {
+        if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR,
+                       (const void *)&on, sizeof(on)) != 0) {
+            ERR_raise_data(ERR_LIB_SYS, get_last_socket_error(),
+                           "calling setsockopt()");
+            BIOerr(BIO_F_BIO_BIND, BIO_R_UNABLE_TO_REUSEADDR);
+            return 0;
+        }
+    }
+# endif
+
+    if (bind(sock, BIO_ADDR_sockaddr(addr), BIO_ADDR_sockaddr_size(addr)) != 0) {
+        ERR_raise_data(ERR_LIB_SYS, get_last_socket_error(),
+                       "calling bind()");
+        BIOerr(BIO_F_BIO_BIND, BIO_R_UNABLE_TO_BIND_SOCKET);
+        return 0;
+    }
+
     return 1;
 }
 
@@ -189,7 +215,7 @@ int BIO_connect(int sock, const BIO_ADDR *addr, int options)
  * fail.  We can't tell the difference between already listening ourself to
  * it and someone else listening to it when failing and errno is EADDRINUSE, so
  * it's recommended to not give an error in that case if the first call was
- * succesful.
+ * successful.
  *
  * When restarting the program it could be that the port is still in use.  If
  * you set to BIO_SOCK_REUSEADDR option it will try to reuse the port anyway.
@@ -206,9 +232,11 @@ int BIO_listen(int sock, const BIO_ADDR *addr, int options)
         return 0;
     }
 
-    if (getsockopt(sock, SOL_SOCKET, SO_TYPE, &socktype, &socktype_len) != 0
+    if (getsockopt(sock, SOL_SOCKET, SO_TYPE,
+                   (void *)&socktype, &socktype_len) != 0
         || socktype_len != sizeof(socktype)) {
-        SYSerr(SYS_F_GETSOCKOPT, get_last_socket_error());
+        ERR_raise_data(ERR_LIB_SYS, get_last_socket_error(),
+                       "calling getsockopt()");
         BIOerr(BIO_F_BIO_LISTEN, BIO_R_GETTING_SOCKTYPE);
         return 0;
     }
@@ -216,52 +244,49 @@ int BIO_listen(int sock, const BIO_ADDR *addr, int options)
     if (!BIO_socket_nbio(sock, (options & BIO_SOCK_NONBLOCK) != 0))
         return 0;
 
-# ifndef OPENSSL_SYS_WINDOWS
-    /* SO_REUSEADDR has different behavior on Windows than on
-     * other operating systems, don't set it there. */
-    if (options & BIO_SOCK_REUSEADDR) {
-        if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) != 0) {
-            SYSerr(SYS_F_SETSOCKOPT, get_last_socket_error());
-            BIOerr(BIO_F_BIO_LISTEN, BIO_R_UNABLE_TO_REUSEADDR);
-            return 0;
-        }
-    }
-# endif
-
     if (options & BIO_SOCK_KEEPALIVE) {
-        if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on)) != 0) {
-            SYSerr(SYS_F_SETSOCKOPT, get_last_socket_error());
+        if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE,
+                       (const void *)&on, sizeof(on)) != 0) {
+            ERR_raise_data(ERR_LIB_SYS, get_last_socket_error(),
+                           "calling setsockopt()");
             BIOerr(BIO_F_BIO_LISTEN, BIO_R_UNABLE_TO_KEEPALIVE);
             return 0;
         }
     }
 
     if (options & BIO_SOCK_NODELAY) {
-        if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on)) != 0) {
-            SYSerr(SYS_F_SETSOCKOPT, get_last_socket_error());
+        if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
+                       (const void *)&on, sizeof(on)) != 0) {
+            ERR_raise_data(ERR_LIB_SYS, get_last_socket_error(),
+                           "calling setsockopt()");
             BIOerr(BIO_F_BIO_LISTEN, BIO_R_UNABLE_TO_NODELAY);
             return 0;
         }
     }
 
 # ifdef IPV6_V6ONLY
-    if ((options & BIO_SOCK_V6_ONLY) && BIO_ADDR_family(addr) == AF_INET6) {
-        if (setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &on, sizeof(on)) != 0) {
-            SYSerr(SYS_F_SETSOCKOPT, get_last_socket_error());
+    if (BIO_ADDR_family(addr) == AF_INET6) {
+        /*
+         * Note: Windows default of IPV6_V6ONLY is ON, and Linux is OFF.
+         * Therefore we always have to use setsockopt here.
+         */
+        on = options & BIO_SOCK_V6_ONLY ? 1 : 0;
+        if (setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY,
+                       (const void *)&on, sizeof(on)) != 0) {
+            ERR_raise_data(ERR_LIB_SYS, get_last_socket_error(),
+                           "calling setsockopt()");
             BIOerr(BIO_F_BIO_LISTEN, BIO_R_LISTEN_V6_ONLY);
             return 0;
         }
     }
 # endif
 
-    if (bind(sock, BIO_ADDR_sockaddr(addr), BIO_ADDR_sockaddr_size(addr)) != 0) {
-        SYSerr(SYS_F_BIND, get_last_socket_error());
-        BIOerr(BIO_F_BIO_LISTEN, BIO_R_UNABLE_TO_BIND_SOCKET);
+    if (!BIO_bind(sock, addr, options))
         return 0;
-    }
 
     if (socktype != SOCK_DGRAM && listen(sock, MAX_LISTEN) == -1) {
-        SYSerr(SYS_F_LISTEN, get_last_socket_error());
+        ERR_raise_data(ERR_LIB_SYS, get_last_socket_error(),
+                       "calling listen()");
         BIOerr(BIO_F_BIO_LISTEN, BIO_R_UNABLE_TO_LISTEN_SOCKET);
         return 0;
     }
@@ -288,14 +313,17 @@ int BIO_accept_ex(int accept_sock, BIO_ADDR *addr_, int options)
                            BIO_ADDR_sockaddr_noconst(addr), &len);
     if (accepted_sock == -1) {
         if (!BIO_sock_should_retry(accepted_sock)) {
-            SYSerr(SYS_F_ACCEPT, get_last_socket_error());
+            ERR_raise_data(ERR_LIB_SYS, get_last_socket_error(),
+                           "calling accept()");
             BIOerr(BIO_F_BIO_ACCEPT_EX, BIO_R_ACCEPT_ERROR);
         }
         return INVALID_SOCKET;
     }
 
-    if (!BIO_socket_nbio(accepted_sock, (options & BIO_SOCK_NONBLOCK) != 0))
+    if (!BIO_socket_nbio(accepted_sock, (options & BIO_SOCK_NONBLOCK) != 0)) {
+        closesocket(accepted_sock);
         return INVALID_SOCKET;
+    }
 
     return accepted_sock;
 }

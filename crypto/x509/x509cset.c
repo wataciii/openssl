@@ -1,119 +1,53 @@
 /*
- * Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL project
- * 2001.
- */
-/* ====================================================================
- * Copyright (c) 2001 The OpenSSL Project.  All rights reserved.
+ * Copyright 2001-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 #include <stdio.h>
 #include "internal/cryptlib.h"
+#include "internal/refcount.h"
 #include <openssl/asn1.h>
 #include <openssl/objects.h>
 #include <openssl/evp.h>
 #include <openssl/x509.h>
-#include "internal/x509_int.h"
+#include "crypto/x509.h"
+
+DEFINE_STACK_OF(X509_REVOKED)
 
 int X509_CRL_set_version(X509_CRL *x, long version)
 {
     if (x == NULL)
-        return (0);
+        return 0;
     if (x->crl.version == NULL) {
         if ((x->crl.version = ASN1_INTEGER_new()) == NULL)
-            return (0);
+            return 0;
     }
-    return (ASN1_INTEGER_set(x->crl.version, version));
+    return ASN1_INTEGER_set(x->crl.version, version);
 }
 
-int X509_CRL_set_issuer_name(X509_CRL *x, X509_NAME *name)
+int X509_CRL_set_issuer_name(X509_CRL *x, const X509_NAME *name)
 {
     if (x == NULL)
-        return (0);
-    return (X509_NAME_set(&x->crl.issuer, name));
+        return 0;
+    return X509_NAME_set(&x->crl.issuer, name);
 }
 
-int X509_CRL_set_lastUpdate(X509_CRL *x, const ASN1_TIME *tm)
+int X509_CRL_set1_lastUpdate(X509_CRL *x, const ASN1_TIME *tm)
 {
-    ASN1_TIME *in;
-
     if (x == NULL)
-        return (0);
-    in = x->crl.lastUpdate;
-    if (in != tm) {
-        in = ASN1_STRING_dup(tm);
-        if (in != NULL) {
-            ASN1_TIME_free(x->crl.lastUpdate);
-            x->crl.lastUpdate = in;
-        }
-    }
-    return (in != NULL);
+        return 0;
+    return x509_set1_time(&x->crl.lastUpdate, tm);
 }
 
-int X509_CRL_set_nextUpdate(X509_CRL *x, const ASN1_TIME *tm)
+int X509_CRL_set1_nextUpdate(X509_CRL *x, const ASN1_TIME *tm)
 {
-    ASN1_TIME *in;
-
     if (x == NULL)
-        return (0);
-    in = x->crl.nextUpdate;
-    if (in != tm) {
-        in = ASN1_STRING_dup(tm);
-        if (in != NULL) {
-            ASN1_TIME_free(x->crl.nextUpdate);
-            x->crl.nextUpdate = in;
-        }
-    }
-    return (in != NULL);
+        return 0;
+    return x509_set1_time(&x->crl.nextUpdate, tm);
 }
 
 int X509_CRL_sort(X509_CRL *c)
@@ -132,17 +66,34 @@ int X509_CRL_sort(X509_CRL *c)
     return 1;
 }
 
-void X509_CRL_up_ref(X509_CRL *crl)
+int X509_CRL_up_ref(X509_CRL *crl)
 {
     int i;
-    CRYPTO_atomic_add(&crl->references, 1, &i, crl->lock);
+
+    if (CRYPTO_UP_REF(&crl->references, &i, crl->lock) <= 0)
+        return 0;
+
+    REF_PRINT_COUNT("X509_CRL", crl);
+    REF_ASSERT_ISNT(i < 2);
+    return ((i > 1) ? 1 : 0);
 }
 
-long X509_CRL_get_version(X509_CRL *crl)
+long X509_CRL_get_version(const X509_CRL *crl)
 {
     return ASN1_INTEGER_get(crl->crl.version);
 }
 
+const ASN1_TIME *X509_CRL_get0_lastUpdate(const X509_CRL *crl)
+{
+    return crl->crl.lastUpdate;
+}
+
+const ASN1_TIME *X509_CRL_get0_nextUpdate(const X509_CRL *crl)
+{
+    return crl->crl.nextUpdate;
+}
+
+#ifndef OPENSSL_NO_DEPRECATED_1_1_0
 ASN1_TIME *X509_CRL_get_lastUpdate(X509_CRL *crl)
 {
     return crl->crl.lastUpdate;
@@ -152,13 +103,14 @@ ASN1_TIME *X509_CRL_get_nextUpdate(X509_CRL *crl)
 {
     return crl->crl.nextUpdate;
 }
+#endif
 
-X509_NAME *X509_CRL_get_issuer(X509_CRL *crl)
+X509_NAME *X509_CRL_get_issuer(const X509_CRL *crl)
 {
     return crl->crl.issuer;
 }
 
-STACK_OF(X509_EXTENSION) *X509_CRL_get0_extensions(X509_CRL *crl)
+const STACK_OF(X509_EXTENSION) *X509_CRL_get0_extensions(const X509_CRL *crl)
 {
     return crl->crl.extensions;
 }
@@ -168,8 +120,8 @@ STACK_OF(X509_REVOKED) *X509_CRL_get_REVOKED(X509_CRL *crl)
     return crl->crl.revoked;
 }
 
-void X509_CRL_get0_signature(ASN1_BIT_STRING **psig, X509_ALGOR **palg,
-                             X509_CRL *crl)
+void X509_CRL_get0_signature(const X509_CRL *crl, const ASN1_BIT_STRING **psig,
+                             const X509_ALGOR **palg)
 {
     if (psig != NULL)
         *psig = &crl->signature;
@@ -182,7 +134,7 @@ int X509_CRL_get_signature_nid(const X509_CRL *crl)
     return OBJ_obj2nid(crl->sig_alg.algorithm);
 }
 
-ASN1_TIME *X509_REVOKED_get0_revocationDate(X509_REVOKED *x)
+const ASN1_TIME *X509_REVOKED_get0_revocationDate(const X509_REVOKED *x)
 {
     return x->revocationDate;
 }
@@ -192,7 +144,7 @@ int X509_REVOKED_set_revocationDate(X509_REVOKED *x, ASN1_TIME *tm)
     ASN1_TIME *in;
 
     if (x == NULL)
-        return (0);
+        return 0;
     in = x->revocationDate;
     if (in != tm) {
         in = ASN1_STRING_dup(tm);
@@ -204,7 +156,7 @@ int X509_REVOKED_set_revocationDate(X509_REVOKED *x, ASN1_TIME *tm)
     return (in != NULL);
 }
 
-ASN1_INTEGER *X509_REVOKED_get0_serialNumber(X509_REVOKED *x)
+const ASN1_INTEGER *X509_REVOKED_get0_serialNumber(const X509_REVOKED *x)
 {
     return &x->serialNumber;
 }
@@ -214,14 +166,14 @@ int X509_REVOKED_set_serialNumber(X509_REVOKED *x, ASN1_INTEGER *serial)
     ASN1_INTEGER *in;
 
     if (x == NULL)
-        return (0);
+        return 0;
     in = &x->serialNumber;
     if (in != serial)
         return ASN1_STRING_copy(in, serial);
     return 1;
 }
 
-STACK_OF(X509_EXTENSION) *X509_REVOKED_get0_extensions(X509_REVOKED *r)
+const STACK_OF(X509_EXTENSION) *X509_REVOKED_get0_extensions(const X509_REVOKED *r)
 {
     return r->extensions;
 }

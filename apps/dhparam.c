@@ -1,177 +1,95 @@
-/* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
- * All rights reserved.
+/*
+ * Copyright 1995-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * This package is an SSL implementation written
- * by Eric Young (eay@cryptsoft.com).
- * The implementation was written so as to conform with Netscapes SSL.
- *
- * This library is free for commercial and non-commercial use as long as
- * the following conditions are aheared to.  The following conditions
- * apply to all code found in this distribution, be it the RC4, RSA,
- * lhash, DES, etc., code; not just the SSL code.  The SSL documentation
- * included with this distribution is covered by the same copyright terms
- * except that the holder is Tim Hudson (tjh@cryptsoft.com).
- *
- * Copyright remains Eric Young's, and as such any Copyright notices in
- * the code are not to be removed.
- * If this package is used in a product, Eric Young should be given attribution
- * as the author of the parts of the library used.
- * This can be in the form of a textual message at program startup or
- * in documentation (online or textual) provided with the package.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. All advertising materials mentioning features or use of this software
- *    must display the following acknowledgement:
- *    "This product includes cryptographic software written by
- *     Eric Young (eay@cryptsoft.com)"
- *    The word 'cryptographic' can be left out if the rouines from the library
- *    being used are not cryptographic related :-).
- * 4. If you include any Windows specific code (or a derivative thereof) from
- *    the apps directory (application code) you must include an acknowledgement:
- *    "This product includes software written by Tim Hudson (tjh@cryptsoft.com)"
- *
- * THIS SOFTWARE IS PROVIDED BY ERIC YOUNG ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- *
- * The licence and distribution terms for any publically available version or
- * derivative of this code cannot be changed.  i.e. this code cannot simply be
- * copied and put under another distribution licence
- * [including the GNU Public Licence.]
- */
-/* ====================================================================
- * Copyright (c) 1998-2000 The OpenSSL Project.  All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.openssl.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    openssl-core@openssl.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.openssl.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
+#ifndef OPENSSL_NO_DEPRECATED_3_0
+/* We need to use some deprecated APIs */
+# define OPENSSL_SUPPRESS_DEPRECATED
+#endif
 #include <openssl/opensslconf.h>
-#ifdef OPENSSL_NO_DH
-NON_EMPTY_TRANSLATION_UNIT
-#else
 
-# include <stdio.h>
-# include <stdlib.h>
-# include <time.h>
-# include <string.h>
-# include "apps.h"
-# include <openssl/bio.h>
-# include <openssl/err.h>
-# include <openssl/bn.h>
-# include <openssl/dh.h>
-# include <openssl/x509.h>
-# include <openssl/pem.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <string.h>
+#include "apps.h"
+#include "progs.h"
+#include <openssl/bio.h>
+#include <openssl/err.h>
+#include <openssl/bn.h>
+#include <openssl/dh.h>
+#include <openssl/x509.h>
+#include <openssl/pem.h>
 
-# ifndef OPENSSL_NO_DSA
-#  include <openssl/dsa.h>
-# endif
+#if !defined(OPENSSL_NO_DSA) && !defined(OPENSSL_NO_DEPRECATED_3_0)
+# include <openssl/dsa.h>
+#endif
 
-# define DEFBITS 2048
+#define DEFBITS 2048
 
+#if !defined(OPENSSL_NO_DSA) && !defined(OPENSSL_NO_DEPRECATED_3_0)
 static int dh_cb(int p, int n, BN_GENCB *cb);
+#endif
+static int gendh_cb(EVP_PKEY_CTX *ctx);
 
 typedef enum OPTION_choice {
     OPT_ERR = -1, OPT_EOF = 0, OPT_HELP,
     OPT_INFORM, OPT_OUTFORM, OPT_IN, OPT_OUT,
     OPT_ENGINE, OPT_CHECK, OPT_TEXT, OPT_NOOUT,
-    OPT_RAND, OPT_DSAPARAM, OPT_C, OPT_2, OPT_5
+    OPT_DSAPARAM, OPT_C, OPT_2, OPT_3, OPT_5,
+    OPT_R_ENUM, OPT_PROV_ENUM
 } OPTION_CHOICE;
 
-OPTIONS dhparam_options[] = {
-    {OPT_HELP_STR, 1, '-', "Usage: %s [flags] [numbits]\n"},
-    {OPT_HELP_STR, 1, '-', "Valid options are:\n"},
+const OPTIONS dhparam_options[] = {
+    {OPT_HELP_STR, 1, '-', "Usage: %s [options] [numbits]\n"},
+
+    OPT_SECTION("General"),
     {"help", OPT_HELP, '-', "Display this summary"},
-    {"in", OPT_IN, '<', "Input file"},
-    {"inform", OPT_INFORM, 'F', "Input format, DER or PEM"},
-    {"outform", OPT_OUTFORM, 'F', "Output format, DER or PEM"},
-    {"out", OPT_OUT, '>', "Output file"},
     {"check", OPT_CHECK, '-', "Check the DH parameters"},
-    {"text", OPT_TEXT, '-', "Print a text form of the DH parameters"},
-    {"noout", OPT_NOOUT, '-'},
-    {"rand", OPT_RAND, 's',
-     "Load the file(s) into the random number generator"},
-    {"C", OPT_C, '-', "Print C code"},
-    {"2", OPT_2, '-', "Generate parameters using 2 as the generator value"},
-    {"5", OPT_5, '-', "Generate parameters using 5 as the generator value"},
-# ifndef OPENSSL_NO_DSA
+#ifndef OPENSSL_NO_DSA
     {"dsaparam", OPT_DSAPARAM, '-',
      "Read or generate DSA parameters, convert to DH"},
-# endif
-# ifndef OPENSSL_NO_ENGINE
+#endif
+#ifndef OPENSSL_NO_ENGINE
     {"engine", OPT_ENGINE, 's', "Use engine e, possibly a hardware device"},
-# endif
+#endif
+
+    OPT_SECTION("Input"),
+    {"in", OPT_IN, '<', "Input file"},
+    {"inform", OPT_INFORM, 'F', "Input format, DER or PEM"},
+
+    OPT_SECTION("Output"),
+    {"out", OPT_OUT, '>', "Output file"},
+    {"outform", OPT_OUTFORM, 'F', "Output format, DER or PEM"},
+    {"text", OPT_TEXT, '-', "Print a text form of the DH parameters"},
+    {"noout", OPT_NOOUT, '-', "Don't output any DH parameters"},
+    {"C", OPT_C, '-', "Print C code"},
+    {"2", OPT_2, '-', "Generate parameters using 2 as the generator value"},
+    {"3", OPT_3, '-', "Generate parameters using 3 as the generator value"},
+    {"5", OPT_5, '-', "Generate parameters using 5 as the generator value"},
+
+    OPT_R_OPTIONS,
+    OPT_PROV_OPTIONS,
+
+    OPT_PARAMETERS(),
+    {"numbits", 0, 0, "Number of bits if generating parameters (optional)"},
     {NULL}
 };
 
 int dhparam_main(int argc, char **argv)
 {
     BIO *in = NULL, *out = NULL;
-    DH *dh = NULL;
-    char *infile = NULL, *outfile = NULL, *prog, *inrand = NULL;
-#ifndef OPENSSL_NO_DSA
+    DH *dh = NULL, *alloc_dh = NULL;
+    EVP_PKEY *pkey = NULL;
+    EVP_PKEY_CTX *ctx = NULL;
+    char *infile = NULL, *outfile = NULL, *prog;
+    ENGINE *e = NULL;
+#if !defined(OPENSSL_NO_DSA) && !defined(OPENSSL_NO_DEPRECATED_3_0)
     int dsaparam = 0;
 #endif
     int i, text = 0, C = 0, ret = 1, num = 0, g = 0;
@@ -205,7 +123,7 @@ int dhparam_main(int argc, char **argv)
             outfile = opt_arg();
             break;
         case OPT_ENGINE:
-            (void)setup_engine(opt_arg(), 0);
+            e = setup_engine(opt_arg(), 0);
             break;
         case OPT_CHECK:
             check = 1;
@@ -215,7 +133,11 @@ int dhparam_main(int argc, char **argv)
             break;
         case OPT_DSAPARAM:
 #ifndef OPENSSL_NO_DSA
+# ifdef OPENSSL_NO_DEPRECATED_3_0
+            BIO_printf(bio_err, "The dsaparam option is deprecated.\n");
+# else
             dsaparam = 1;
+# endif
 #endif
             break;
         case OPT_C:
@@ -224,58 +146,62 @@ int dhparam_main(int argc, char **argv)
         case OPT_2:
             g = 2;
             break;
+        case OPT_3:
+            g = 3;
+            break;
         case OPT_5:
             g = 5;
             break;
         case OPT_NOOUT:
             noout = 1;
             break;
-        case OPT_RAND:
-            inrand = opt_arg();
+        case OPT_R_CASES:
+            if (!opt_rand(o))
+                goto end;
+            break;
+        case OPT_PROV_CASES:
+            if (!opt_provider(o))
+                goto end;
             break;
         }
     }
     argc = opt_num_rest();
     argv = opt_rest();
 
-    if (argv[0] && (!opt_int(argv[0], &num) || num <= 0))
+    if (argv[0] != NULL && (!opt_int(argv[0], &num) || num <= 0))
         goto end;
 
     if (g && !num)
         num = DEFBITS;
 
-# ifndef OPENSSL_NO_DSA
+#if !defined(OPENSSL_NO_DSA) && !defined(OPENSSL_NO_DEPRECATED_3_0)
     if (dsaparam && g) {
         BIO_printf(bio_err,
-                   "generator may not be chosen for DSA parameters\n");
+                   "Error, generator may not be chosen for DSA parameters\n");
         goto end;
     }
-# endif
+#endif
+
+    out = bio_open_default(outfile, 'w', outformat);
+    if (out == NULL)
+        goto end;
+
     /* DH parameters */
     if (num && !g)
         g = 2;
 
     if (num) {
 
-        BN_GENCB *cb;
-        cb = BN_GENCB_new();
-        if (cb == NULL) {
-            ERR_print_errors(bio_err);
-            goto end;
-        }
 
-        BN_GENCB_set(cb, dh_cb, bio_err);
-        if (!app_RAND_load_file(NULL, 1) && inrand == NULL) {
-            BIO_printf(bio_err,
-                       "warning, not much extra random data, consider using the -rand option\n");
-        }
-        if (inrand != NULL)
-            BIO_printf(bio_err, "%ld semi-random bytes loaded\n",
-                       app_RAND_load_files(inrand));
-
-# ifndef OPENSSL_NO_DSA
+#if !defined(OPENSSL_NO_DSA) && !defined(OPENSSL_NO_DEPRECATED_3_0)
         if (dsaparam) {
             DSA *dsa = DSA_new();
+            BN_GENCB *cb  = BN_GENCB_new();
+
+            if (cb == NULL)
+                goto end;
+
+            BN_GENCB_set(cb, dh_cb, bio_err);
 
             BIO_printf(bio_err,
                        "Generating DSA parameters, %d bit long prime\n", num);
@@ -284,41 +210,52 @@ int dhparam_main(int argc, char **argv)
                                                cb)) {
                 DSA_free(dsa);
                 BN_GENCB_free(cb);
-                ERR_print_errors(bio_err);
+                BIO_printf(bio_err, "Error, unable to generate DSA parameters\n");
                 goto end;
             }
 
-            dh = DSA_dup_DH(dsa);
+            dh = alloc_dh = DSA_dup_DH(dsa);
             DSA_free(dsa);
-            if (dh == NULL) {
-                BN_GENCB_free(cb);
-                ERR_print_errors(bio_err);
+            BN_GENCB_free(cb);
+            if (dh == NULL)
+                goto end;
+        } else
+#endif
+        {
+            ctx = EVP_PKEY_CTX_new_from_name(NULL, "DH", NULL);
+            if (ctx == NULL) {
+                BIO_printf(bio_err,
+                           "Error, DH key generation context allocation failed\n");
                 goto end;
             }
-        } else
-# endif
-        {
-            dh = DH_new();
+            EVP_PKEY_CTX_set_cb(ctx, gendh_cb);
+            EVP_PKEY_CTX_set_app_data(ctx, bio_err);
             BIO_printf(bio_err,
                        "Generating DH parameters, %d bit long safe prime, generator %d\n",
                        num, g);
             BIO_printf(bio_err, "This is going to take a long time\n");
-            if (dh == NULL || !DH_generate_parameters_ex(dh, num, g, cb)) {
-                BN_GENCB_free(cb);
-                ERR_print_errors(bio_err);
+            if (!EVP_PKEY_paramgen_init(ctx)) {
+                BIO_printf(bio_err,
+                           "Error, unable to initialise DH param generation\n");
                 goto end;
             }
+
+            if (!EVP_PKEY_CTX_set_dh_paramgen_prime_len(ctx, num)) {
+                BIO_printf(bio_err, "Error, unable to set DH prime length\n");
+                goto end;
+            }
+            if (!EVP_PKEY_paramgen(ctx, &pkey)) {
+                BIO_printf(bio_err, "Error, DH generation failed\n");
+                goto end;
+            }
+            dh = EVP_PKEY_get0_DH(pkey);
         }
-
-        BN_GENCB_free(cb);
-        app_RAND_write_file(NULL);
     } else {
-
         in = bio_open_default(infile, 'r', informat);
         if (in == NULL)
             goto end;
 
-# ifndef OPENSSL_NO_DSA
+#if !defined(OPENSSL_NO_DSA) && !defined(OPENSSL_NO_DEPRECATED_3_0)
         if (dsaparam) {
             DSA *dsa;
 
@@ -328,127 +265,147 @@ int dhparam_main(int argc, char **argv)
                 dsa = PEM_read_bio_DSAparams(in, NULL, NULL, NULL);
 
             if (dsa == NULL) {
-                BIO_printf(bio_err, "unable to load DSA parameters\n");
-                ERR_print_errors(bio_err);
+                BIO_printf(bio_err, "Error, unable to load DSA parameters\n");
                 goto end;
             }
 
-            dh = DSA_dup_DH(dsa);
+            dh = alloc_dh = DSA_dup_DH(dsa);
             DSA_free(dsa);
-            if (dh == NULL) {
-                ERR_print_errors(bio_err);
+            if (dh == NULL)
                 goto end;
-            }
         } else
-# endif
+#endif
         {
-            if (informat == FORMAT_ASN1)
-                dh = d2i_DHparams_bio(in, NULL);
-            else                /* informat == FORMAT_PEM */
-                dh = PEM_read_bio_DHparams(in, NULL, NULL, NULL);
+            if (informat == FORMAT_ASN1) {
+                /*
+                 * We have no PEM header to determine what type of DH params it
+                 * is. We'll just try both.
+                 */
+                dh = alloc_dh = ASN1_d2i_bio_of(DH, DH_new, d2i_DHparams, in, NULL);
+                /* BIO_reset() returns 0 for success for file BIOs only!!! */
+                if (dh == NULL && BIO_reset(in) == 0)
+                    dh = alloc_dh = ASN1_d2i_bio_of(DH, DH_new, d2i_DHxparams, in, NULL);
+            } else {
+                /* informat == FORMAT_PEM */
+                dh = alloc_dh = PEM_read_bio_DHparams(in, NULL, NULL, NULL);
+            }
 
             if (dh == NULL) {
-                BIO_printf(bio_err, "unable to load DH parameters\n");
-                ERR_print_errors(bio_err);
+                BIO_printf(bio_err, "Error, unable to load DH parameters\n");
                 goto end;
             }
         }
-
         /* dh != NULL */
     }
 
-    out = bio_open_default(outfile, 'w', outformat);
-    if (out == NULL)
-        goto end;
-
-    if (text) {
-        DHparams_print(out, dh);
-    }
+    if (text)
+        EVP_PKEY_print_params(out, pkey, 4, NULL);
 
     if (check) {
-        if (!DH_check(dh, &i)) {
-            ERR_print_errors(bio_err);
+        if (!EVP_PKEY_param_check(ctx) /* DH_check(dh, &i) */) {
+            BIO_printf(bio_err, "Error, invalid parameters generated\n");
             goto end;
         }
-        if (i & DH_CHECK_P_NOT_PRIME)
-            printf("p value is not prime\n");
-        if (i & DH_CHECK_P_NOT_SAFE_PRIME)
-            printf("p value is not a safe prime\n");
-        if (i & DH_UNABLE_TO_CHECK_GENERATOR)
-            printf("unable to check the generator value\n");
-        if (i & DH_NOT_SUITABLE_GENERATOR)
-            printf("the g value is not a generator\n");
-        if (i == 0)
-            printf("DH parameters appear to be ok.\n");
+        BIO_printf(bio_err, "DH parameters appear to be ok.\n");
+        if (num != 0) {
+            /*
+             * We have generated parameters but DH_check() indicates they are
+             * invalid! This should never happen!
+             */
+            BIO_printf(bio_err, "Error, invalid parameters generated\n");
+            goto end;
+        }
     }
     if (C) {
         unsigned char *data;
         int len, bits;
+        const BIGNUM *pbn, *gbn;
 
-        len = BN_num_bytes(dh->p);
-        bits = BN_num_bits(dh->p);
+        dh = EVP_PKEY_get0_DH(pkey);
+        len = EVP_PKEY_size(pkey);
+        bits = EVP_PKEY_size(pkey);
+        DH_get0_pqg(dh, &pbn, NULL, &gbn);
         data = app_malloc(len, "print a BN");
-        BIO_printf(out, "#ifndef HEADER_DH_H\n"
-                        "# include <openssl/dh.h>\n"
-                        "#endif\n"
-                        "\n");
-        BIO_printf(out, "DH *get_dh%d()\n{\n", bits);
-        print_bignum_var(out, dh->p, "dhp", bits, data);
-        print_bignum_var(out, dh->g, "dhg", bits, data);
-        BIO_printf(out, "    DH *dh = DN_new();\n"
+
+        BIO_printf(out, "static DH *get_dh%d(void)\n{\n", bits);
+        print_bignum_var(out, pbn, "dhp", bits, data);
+        print_bignum_var(out, gbn, "dhg", bits, data);
+        BIO_printf(out, "    DH *dh = DH_new();\n"
+                        "    BIGNUM *p, *g;\n"
                         "\n"
                         "    if (dh == NULL)\n"
                         "        return NULL;\n");
-        BIO_printf(out, "    dh->p = BN_bin2bn(dhp_%d, sizeof (dhp_%d), NULL);\n",
-               bits, bits);
-        BIO_printf(out, "    dh->g = BN_bin2bn(dhg_%d, sizeof (dhg_%d), NULL);\n",
-               bits, bits);
-        BIO_printf(out, "    if (!dh->p || !dh->g) {\n"
+        BIO_printf(out, "    p = BN_bin2bn(dhp_%d, sizeof(dhp_%d), NULL);\n",
+                   bits, bits);
+        BIO_printf(out, "    g = BN_bin2bn(dhg_%d, sizeof(dhg_%d), NULL);\n",
+                   bits, bits);
+        BIO_printf(out, "    if (p == NULL || g == NULL\n"
+                        "            || !DH_set0_pqg(dh, p, NULL, g)) {\n"
                         "        DH_free(dh);\n"
+                        "        BN_free(p);\n"
+                        "        BN_free(g);\n"
                         "        return NULL;\n"
                         "    }\n");
-        if (dh->length)
+        if (DH_get_length(dh) > 0)
             BIO_printf(out,
-                        "    dh->length = %ld;\n", dh->length);
+                        "    if (!DH_set_length(dh, %ld)) {\n"
+                        "        DH_free(dh);\n"
+                        "        return NULL;\n"
+                        "    }\n", DH_get_length(dh));
         BIO_printf(out, "    return dh;\n}\n");
         OPENSSL_free(data);
     }
 
     if (!noout) {
-        if (outformat == FORMAT_ASN1)
-            i = i2d_DHparams_bio(out, dh);
-        else if (dh->q)
+        const BIGNUM *q;
+        DH_get0_pqg(dh, NULL, &q, NULL);
+        if (outformat == FORMAT_ASN1) {
+            if (q != NULL)
+                i = ASN1_i2d_bio_of(DH, i2d_DHxparams, out, dh);
+            else
+                i = ASN1_i2d_bio_of(DH, i2d_DHparams, out, dh);
+        } else if (q != NULL) {
             i = PEM_write_bio_DHxparams(out, dh);
-        else
+        } else {
             i = PEM_write_bio_DHparams(out, dh);
+        }
         if (!i) {
-            BIO_printf(bio_err, "unable to write DH parameters\n");
-            ERR_print_errors(bio_err);
+            BIO_printf(bio_err, "Error, unable to write DH parameters\n");
             goto end;
         }
     }
     ret = 0;
  end:
+    if (ret != 0)
+        ERR_print_errors(bio_err);
+    DH_free(alloc_dh);
     BIO_free(in);
     BIO_free_all(out);
-    DH_free(dh);
-    return (ret);
+    EVP_PKEY_free(pkey);
+    EVP_PKEY_CTX_free(ctx);
+    release_engine(e);
+    return ret;
 }
 
-static int dh_cb(int p, int n, BN_GENCB *cb)
+static int common_dh_cb(int p, BIO *b)
 {
-    char c = '*';
+    static const char symbols[] = ".+*\n";
+    char c = (p >= 0 && (size_t)p < sizeof(symbols) - 1) ? symbols[p] : '?';
 
-    if (p == 0)
-        c = '.';
-    if (p == 1)
-        c = '+';
-    if (p == 2)
-        c = '*';
-    if (p == 3)
-        c = '\n';
-    BIO_write(BN_GENCB_get_arg(cb), &c, 1);
-    (void)BIO_flush(BN_GENCB_get_arg(cb));
+    BIO_write(b, &c, 1);
+    (void)BIO_flush(b);
     return 1;
 }
+
+#if !defined(OPENSSL_NO_DSA) && !defined(OPENSSL_NO_DEPRECATED_3_0)
+static int dh_cb(int p, int n, BN_GENCB *cb)
+{
+    return common_dh_cb(p, BN_GENCB_get_arg(cb));
+}
 #endif
+
+static int gendh_cb(EVP_PKEY_CTX *ctx)
+{
+    return common_dh_cb(EVP_PKEY_CTX_get_keygen_info(ctx, 0),
+                        EVP_PKEY_CTX_get_app_data(ctx));
+}

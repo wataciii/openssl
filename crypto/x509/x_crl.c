@@ -1,71 +1,28 @@
-/* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
- * All rights reserved.
+/*
+ * Copyright 1995-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * This package is an SSL implementation written
- * by Eric Young (eay@cryptsoft.com).
- * The implementation was written so as to conform with Netscapes SSL.
- *
- * This library is free for commercial and non-commercial use as long as
- * the following conditions are aheared to.  The following conditions
- * apply to all code found in this distribution, be it the RC4, RSA,
- * lhash, DES, etc., code; not just the SSL code.  The SSL documentation
- * included with this distribution is covered by the same copyright terms
- * except that the holder is Tim Hudson (tjh@cryptsoft.com).
- *
- * Copyright remains Eric Young's, and as such any Copyright notices in
- * the code are not to be removed.
- * If this package is used in a product, Eric Young should be given attribution
- * as the author of the parts of the library used.
- * This can be in the form of a textual message at program startup or
- * in documentation (online or textual) provided with the package.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. All advertising materials mentioning features or use of this software
- *    must display the following acknowledgement:
- *    "This product includes cryptographic software written by
- *     Eric Young (eay@cryptsoft.com)"
- *    The word 'cryptographic' can be left out if the rouines from the library
- *    being used are not cryptographic related :-).
- * 4. If you include any Windows specific code (or a derivative thereof) from
- *    the apps directory (application code) you must include an acknowledgement:
- *    "This product includes software written by Tim Hudson (tjh@cryptsoft.com)"
- *
- * THIS SOFTWARE IS PROVIDED BY ERIC YOUNG ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- *
- * The licence and distribution terms for any publically available version or
- * derivative of this code cannot be changed.  i.e. this code cannot simply be
- * copied and put under another distribution licence
- * [including the GNU Public Licence.]
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 #include <stdio.h>
 #include "internal/cryptlib.h"
 #include <openssl/asn1t.h>
 #include <openssl/x509.h>
-#include "internal/x509_int.h"
+#include "crypto/x509.h"
 #include <openssl/x509v3.h>
-#include "x509_lcl.h"
+#include "x509_local.h"
+
+DEFINE_STACK_OF(GENERAL_NAME)
+DEFINE_STACK_OF(GENERAL_NAMES)
+DEFINE_STACK_OF(X509_REVOKED)
+DEFINE_STACK_OF(X509_EXTENSION)
 
 static int X509_REVOKED_cmp(const X509_REVOKED *const *a,
                             const X509_REVOKED *const *b);
-static void setup_idp(X509_CRL *crl, ISSUING_DIST_POINT *idp);
+static int setup_idp(X509_CRL *crl, ISSUING_DIST_POINT *idp);
 
 ASN1_SEQUENCE(X509_REVOKED) = {
         ASN1_EMBED(X509_REVOKED,serialNumber, ASN1_INTEGER),
@@ -75,8 +32,8 @@ ASN1_SEQUENCE(X509_REVOKED) = {
 
 static int def_crl_verify(X509_CRL *crl, EVP_PKEY *r);
 static int def_crl_lookup(X509_CRL *crl,
-                          X509_REVOKED **ret, ASN1_INTEGER *serial,
-                          X509_NAME *issuer);
+                          X509_REVOKED **ret, const ASN1_INTEGER *serial,
+                          const X509_NAME *issuer);
 
 static X509_CRL_METHOD int_crl_meth = {
     0,
@@ -89,7 +46,7 @@ static const X509_CRL_METHOD *default_crl_method = &int_crl_meth;
 
 /*
  * The X509_CRL_INFO structure needs a bit of customisation. Since we cache
- * the original encoding the signature wont be affected by reordering of the
+ * the original encoding the signature won't be affected by reordering of the
  * revoked field.
  */
 static int crl_inf_cb(int operation, ASN1_VALUE **pval, const ASN1_ITEM *it,
@@ -203,9 +160,21 @@ static int crl_cb(int operation, ASN1_VALUE **pval, const ASN1_ITEM *it,
     X509_CRL *crl = (X509_CRL *)*pval;
     STACK_OF(X509_EXTENSION) *exts;
     X509_EXTENSION *ext;
-    int idx;
+    int idx, i;
 
     switch (operation) {
+    case ASN1_OP_D2I_PRE:
+        if (crl->meth->crl_free) {
+            if (!crl->meth->crl_free(crl))
+                return 0;
+        }
+        AUTHORITY_KEYID_free(crl->akid);
+        ISSUING_DIST_POINT_free(crl->idp);
+        ASN1_INTEGER_free(crl->crl_number);
+        ASN1_INTEGER_free(crl->base_crl_number);
+        sk_GENERAL_NAMES_pop_free(crl->issuers, GENERAL_NAMES_free);
+        /* fall thru */
+
     case ASN1_OP_NEW_POST:
         crl->idp = NULL;
         crl->akid = NULL;
@@ -220,23 +189,35 @@ static int crl_cb(int operation, ASN1_VALUE **pval, const ASN1_ITEM *it,
         break;
 
     case ASN1_OP_D2I_POST:
-        X509_CRL_digest(crl, EVP_sha1(), crl->sha1_hash, NULL);
+        if (!X509_CRL_digest(crl, EVP_sha1(), crl->sha1_hash, NULL))
+            crl->flags |= EXFLAG_INVALID;
         crl->idp = X509_CRL_get_ext_d2i(crl,
-                                        NID_issuing_distribution_point, NULL,
+                                        NID_issuing_distribution_point, &i,
                                         NULL);
-        if (crl->idp)
-            setup_idp(crl, crl->idp);
+        if (crl->idp != NULL) {
+            if (!setup_idp(crl, crl->idp))
+                crl->flags |= EXFLAG_INVALID;
+        }
+        else if (i != -1) {
+            crl->flags |= EXFLAG_INVALID;
+        }
 
         crl->akid = X509_CRL_get_ext_d2i(crl,
-                                         NID_authority_key_identifier, NULL,
+                                         NID_authority_key_identifier, &i,
                                          NULL);
+        if (crl->akid == NULL && i != -1)
+            crl->flags |= EXFLAG_INVALID;
 
         crl->crl_number = X509_CRL_get_ext_d2i(crl,
-                                               NID_crl_number, NULL, NULL);
+                                               NID_crl_number, &i, NULL);
+        if (crl->crl_number == NULL && i != -1)
+            crl->flags |= EXFLAG_INVALID;
 
         crl->base_crl_number = X509_CRL_get_ext_d2i(crl,
-                                                    NID_delta_crl, NULL,
+                                                    NID_delta_crl, &i,
                                                     NULL);
+        if (crl->base_crl_number == NULL && i != -1)
+            crl->flags |= EXFLAG_INVALID;
         /* Delta CRLs must have CRL number */
         if (crl->base_crl_number && !crl->crl_number)
             crl->flags |= EXFLAG_INVALID;
@@ -261,7 +242,7 @@ static int crl_cb(int operation, ASN1_VALUE **pval, const ASN1_ITEM *it,
                 if ((nid == NID_issuing_distribution_point)
                     || (nid == NID_authority_key_identifier)
                     || (nid == NID_delta_crl))
-                    break;;
+                    continue;
                 crl->flags |= EXFLAG_CRITICAL;
                 break;
             }
@@ -274,6 +255,8 @@ static int crl_cb(int operation, ASN1_VALUE **pval, const ASN1_ITEM *it,
             if (crl->meth->crl_init(crl) == 0)
                 return 0;
         }
+
+        crl->flags |= EXFLAG_SET;
         break;
 
     case ASN1_OP_FREE_POST:
@@ -293,9 +276,10 @@ static int crl_cb(int operation, ASN1_VALUE **pval, const ASN1_ITEM *it,
 
 /* Convert IDP into a more convenient form */
 
-static void setup_idp(X509_CRL *crl, ISSUING_DIST_POINT *idp)
+static int setup_idp(X509_CRL *crl, ISSUING_DIST_POINT *idp)
 {
     int idp_only = 0;
+
     /* Set various flags according to IDP */
     crl->idp_flags |= IDP_PRESENT;
     if (idp->onlyuser > 0) {
@@ -326,7 +310,7 @@ static void setup_idp(X509_CRL *crl, ISSUING_DIST_POINT *idp)
         crl->idp_reasons &= CRLDP_ALL_REASONS;
     }
 
-    DIST_POINT_set_dpname(idp->distpoint, X509_CRL_get_issuer(crl));
+    return DIST_POINT_set_dpname(idp->distpoint, X509_CRL_get_issuer(crl));
 }
 
 ASN1_SEQUENCE_ref(X509_CRL, crl_cb) = {
@@ -355,6 +339,7 @@ static int X509_REVOKED_cmp(const X509_REVOKED *const *a,
 int X509_CRL_add0_revoked(X509_CRL *crl, X509_REVOKED *rev)
 {
     X509_CRL_INFO *inf;
+
     inf = &crl->crl;
     if (inf->revoked == NULL)
         inf->revoked = sk_X509_REVOKED_new(X509_REVOKED_cmp);
@@ -374,7 +359,7 @@ int X509_CRL_verify(X509_CRL *crl, EVP_PKEY *r)
 }
 
 int X509_CRL_get0_by_serial(X509_CRL *crl,
-                            X509_REVOKED **ret, ASN1_INTEGER *serial)
+                            X509_REVOKED **ret, const ASN1_INTEGER *serial)
 {
     if (crl->meth->crl_lookup)
         return crl->meth->crl_lookup(crl, ret, serial, NULL);
@@ -385,7 +370,7 @@ int X509_CRL_get0_by_cert(X509_CRL *crl, X509_REVOKED **ret, X509 *x)
 {
     if (crl->meth->crl_lookup)
         return crl->meth->crl_lookup(crl, ret,
-                                     X509_get_serialNumber(x),
+                                     X509_get0_serialNumber(x),
                                      X509_get_issuer_name(x));
     return 0;
 }
@@ -396,7 +381,7 @@ static int def_crl_verify(X509_CRL *crl, EVP_PKEY *r)
                              &crl->sig_alg, &crl->signature, &crl->crl, r));
 }
 
-static int crl_revoked_issuer_match(X509_CRL *crl, X509_NAME *nm,
+static int crl_revoked_issuer_match(X509_CRL *crl, const X509_NAME *nm,
                                     X509_REVOKED *rev)
 {
     int i;
@@ -424,12 +409,15 @@ static int crl_revoked_issuer_match(X509_CRL *crl, X509_NAME *nm,
 }
 
 static int def_crl_lookup(X509_CRL *crl,
-                          X509_REVOKED **ret, ASN1_INTEGER *serial,
-                          X509_NAME *issuer)
+                          X509_REVOKED **ret, const ASN1_INTEGER *serial,
+                          const X509_NAME *issuer)
 {
     X509_REVOKED rtmp, *rev;
-    int idx;
-    rtmp.serialNumber = *serial;
+    int idx, num;
+
+    if (crl->crl.revoked == NULL)
+        return 0;
+
     /*
      * Sort revoked into serial number order if not already sorted. Do this
      * under a lock to avoid race condition.
@@ -439,11 +427,12 @@ static int def_crl_lookup(X509_CRL *crl,
         sk_X509_REVOKED_sort(crl->crl.revoked);
         CRYPTO_THREAD_unlock(crl->lock);
     }
+    rtmp.serialNumber = *serial;
     idx = sk_X509_REVOKED_find(crl->crl.revoked, &rtmp);
     if (idx < 0)
         return 0;
     /* Need to look for matching name */
-    for (; idx < sk_X509_REVOKED_num(crl->crl.revoked); idx++) {
+    for (num = sk_X509_REVOKED_num(crl->crl.revoked); idx < num; idx++) {
         rev = sk_X509_REVOKED_value(crl->crl.revoked, idx);
         if (ASN1_INTEGER_cmp(&rev->serialNumber, serial))
             return 0;
@@ -470,15 +459,17 @@ X509_CRL_METHOD *X509_CRL_METHOD_new(int (*crl_init) (X509_CRL *crl),
                                      int (*crl_free) (X509_CRL *crl),
                                      int (*crl_lookup) (X509_CRL *crl,
                                                         X509_REVOKED **ret,
-                                                        ASN1_INTEGER *ser,
-                                                        X509_NAME *issuer),
+                                                        const ASN1_INTEGER *ser,
+                                                        const X509_NAME *issuer),
                                      int (*crl_verify) (X509_CRL *crl,
                                                         EVP_PKEY *pk))
 {
-    X509_CRL_METHOD *m;
-    m = OPENSSL_malloc(sizeof(*m));
-    if (m == NULL)
+    X509_CRL_METHOD *m = OPENSSL_malloc(sizeof(*m));
+
+    if (m == NULL) {
+        X509err(X509_F_X509_CRL_METHOD_NEW, ERR_R_MALLOC_FAILURE);
         return NULL;
+    }
     m->crl_init = crl_init;
     m->crl_free = crl_free;
     m->crl_lookup = crl_lookup;
@@ -489,7 +480,7 @@ X509_CRL_METHOD *X509_CRL_METHOD_new(int (*crl_init) (X509_CRL *crl),
 
 void X509_CRL_METHOD_free(X509_CRL_METHOD *m)
 {
-    if (!(m->flags & X509_CRL_METHOD_DYNAMIC))
+    if (m == NULL || !(m->flags & X509_CRL_METHOD_DYNAMIC))
         return;
     OPENSSL_free(m);
 }

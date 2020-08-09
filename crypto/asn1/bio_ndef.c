@@ -1,55 +1,10 @@
 /*
- * Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL
- * project.
- */
-/* ====================================================================
- * Copyright (c) 2008 The OpenSSL Project.  All rights reserved.
+ * Copyright 2008-2018 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 #include <openssl/asn1.h>
@@ -94,6 +49,7 @@ static int ndef_suffix(BIO *b, unsigned char **pbuf, int *plen, void *parg);
 static int ndef_suffix_free(BIO *b, unsigned char **pbuf, int *plen,
                             void *parg);
 
+/* unfortunately cannot constify this due to CMS_stream() and PKCS7_stream() */
 BIO *BIO_new_NDEF(BIO *out, ASN1_VALUE *val, const ASN1_ITEM *it)
 {
     NDEF_SUPPORT *ndef_aux = NULL;
@@ -105,21 +61,21 @@ BIO *BIO_new_NDEF(BIO *out, ASN1_VALUE *val, const ASN1_ITEM *it)
         ASN1err(ASN1_F_BIO_NEW_NDEF, ASN1_R_STREAMING_NOT_SUPPORTED);
         return NULL;
     }
-    ndef_aux = OPENSSL_malloc(sizeof(*ndef_aux));
+    ndef_aux = OPENSSL_zalloc(sizeof(*ndef_aux));
     asn_bio = BIO_new(BIO_f_asn1());
+    if (ndef_aux == NULL || asn_bio == NULL)
+        goto err;
 
     /* ASN1 bio needs to be next to output BIO */
-
     out = BIO_push(asn_bio, out);
-
-    if (ndef_aux == NULL || asn_bio == NULL || !out)
+    if (out == NULL)
         goto err;
 
     BIO_asn1_set_prefix(asn_bio, ndef_prefix, ndef_prefix_free);
     BIO_asn1_set_suffix(asn_bio, ndef_suffix, ndef_suffix_free);
 
     /*
-     * Now let callback prepend any digest, cipher etc BIOs ASN1 structure
+     * Now let callback prepends any digest, cipher etc BIOs ASN1 structure
      * needs.
      */
 
@@ -152,21 +108,22 @@ static int ndef_prefix(BIO *b, unsigned char **pbuf, int *plen, void *parg)
     unsigned char *p;
     int derlen;
 
-    if (!parg)
+    if (parg == NULL)
         return 0;
 
     ndef_aux = *(NDEF_SUPPORT **)parg;
 
     derlen = ASN1_item_ndef_i2d(ndef_aux->val, NULL, ndef_aux->it);
-    p = OPENSSL_malloc(derlen);
-    if (p == NULL)
+    if ((p = OPENSSL_malloc(derlen)) == NULL) {
+        ASN1err(ASN1_F_NDEF_PREFIX, ERR_R_MALLOC_FAILURE);
         return 0;
+    }
 
     ndef_aux->derbuf = p;
     *pbuf = p;
     derlen = ASN1_item_ndef_i2d(ndef_aux->val, &p, ndef_aux->it);
 
-    if (!*ndef_aux->boundary)
+    if (*ndef_aux->boundary == NULL)
         return 0;
 
     *plen = *ndef_aux->boundary - *pbuf;
@@ -179,7 +136,7 @@ static int ndef_prefix_free(BIO *b, unsigned char **pbuf, int *plen,
 {
     NDEF_SUPPORT *ndef_aux;
 
-    if (!parg)
+    if (parg == NULL)
         return 0;
 
     ndef_aux = *(NDEF_SUPPORT **)parg;
@@ -211,7 +168,7 @@ static int ndef_suffix(BIO *b, unsigned char **pbuf, int *plen, void *parg)
     const ASN1_AUX *aux;
     ASN1_STREAM_ARG sarg;
 
-    if (!parg)
+    if (parg == NULL)
         return 0;
 
     ndef_aux = *(NDEF_SUPPORT **)parg;
@@ -227,15 +184,18 @@ static int ndef_suffix(BIO *b, unsigned char **pbuf, int *plen, void *parg)
         return 0;
 
     derlen = ASN1_item_ndef_i2d(ndef_aux->val, NULL, ndef_aux->it);
-    p = OPENSSL_malloc(derlen);
-    if (p == NULL)
+    if (derlen < 0)
         return 0;
+    if ((p = OPENSSL_malloc(derlen)) == NULL) {
+        ASN1err(ASN1_F_NDEF_SUFFIX, ERR_R_MALLOC_FAILURE);
+        return 0;
+    }
 
     ndef_aux->derbuf = p;
     *pbuf = p;
     derlen = ASN1_item_ndef_i2d(ndef_aux->val, &p, ndef_aux->it);
 
-    if (!*ndef_aux->boundary)
+    if (*ndef_aux->boundary == NULL)
         return 0;
     *pbuf = *ndef_aux->boundary;
     *plen = derlen - (*ndef_aux->boundary - ndef_aux->derbuf);

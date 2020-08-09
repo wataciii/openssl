@@ -1,70 +1,17 @@
-/* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
- * All rights reserved.
- *
- * This package is an SSL implementation written
- * by Eric Young (eay@cryptsoft.com).
- * The implementation was written so as to conform with Netscapes SSL.
- *
- * This library is free for commercial and non-commercial use as long as
- * the following conditions are aheared to.  The following conditions
- * apply to all code found in this distribution, be it the RC4, RSA,
- * lhash, DES, etc., code; not just the SSL code.  The SSL documentation
- * included with this distribution is covered by the same copyright terms
- * except that the holder is Tim Hudson (tjh@cryptsoft.com).
- *
- * Copyright remains Eric Young's, and as such any Copyright notices in
- * the code are not to be removed.
- * If this package is used in a product, Eric Young should be given attribution
- * as the author of the parts of the library used.
- * This can be in the form of a textual message at program startup or
- * in documentation (online or textual) provided with the package.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. All advertising materials mentioning features or use of this software
- *    must display the following acknowledgement:
- *    "This product includes cryptographic software written by
- *     Eric Young (eay@cryptsoft.com)"
- *    The word 'cryptographic' can be left out if the rouines from the library
- *    being used are not cryptographic related :-).
- * 4. If you include any Windows specific code (or a derivative thereof) from
- *    the apps directory (application code) you must include an acknowledgement:
- *    "This product includes software written by Tim Hudson (tjh@cryptsoft.com)"
- *
- * THIS SOFTWARE IS PROVIDED BY ERIC YOUNG ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- *
- * The licence and distribution terms for any publically available version or
- * derivative of this code cannot be changed.  i.e. this code cannot simply be
- * copied and put under another distribution licence
- * [including the GNU Public Licence.]
- */
-
 /*
- * This was written by Gordon Chaffee <chaffee@plateau.cs.berkeley.edu> and
- * donated 'to the cause' along with lots and lots of other fixes to the
- * library.
+ * Copyright 1995-2020 The OpenSSL Project Authors. All Rights Reserved.
+ *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 #include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
 #include "apps.h"
+#include "progs.h"
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/x509.h>
@@ -72,22 +19,35 @@
 #include <openssl/pem.h>
 #include <openssl/objects.h>
 
+DEFINE_STACK_OF(X509_CRL)
+DEFINE_STACK_OF(X509)
+DEFINE_STACK_OF(X509_INFO)
+DEFINE_STACK_OF_STRING()
+
 static int add_certs_from_file(STACK_OF(X509) *stack, char *certfile);
 
 typedef enum OPTION_choice {
     OPT_ERR = -1, OPT_EOF = 0, OPT_HELP,
-    OPT_INFORM, OPT_OUTFORM, OPT_IN, OPT_OUT, OPT_NOCRL, OPT_CERTFILE
+    OPT_INFORM, OPT_OUTFORM, OPT_IN, OPT_OUT, OPT_NOCRL, OPT_CERTFILE,
+    OPT_PROV_ENUM
 } OPTION_CHOICE;
 
-OPTIONS crl2pkcs7_options[] = {
+const OPTIONS crl2pkcs7_options[] = {
+    OPT_SECTION("General"),
     {"help", OPT_HELP, '-', "Display this summary"},
-    {"inform", OPT_INFORM, 'F', "Input format - DER or PEM"},
-    {"outform", OPT_OUTFORM, 'F', "Output format - DER or PEM"},
+
+    OPT_SECTION("Input"),
     {"in", OPT_IN, '<', "Input file"},
-    {"out", OPT_OUT, '>', "Output file"},
+    {"inform", OPT_INFORM, 'F', "Input format - DER or PEM"},
     {"nocrl", OPT_NOCRL, '-', "No crl to load, just certs from '-certfile'"},
     {"certfile", OPT_CERTFILE, '<',
      "File of chain of certs to a trusted CA; can be repeated"},
+
+    OPT_SECTION("Output"),
+    {"out", OPT_OUT, '>', "Output file"},
+    {"outform", OPT_OUTFORM, 'F', "Output format - DER or PEM"},
+
+    OPT_PROV_OPTIONS,
     {NULL}
 };
 
@@ -138,10 +98,12 @@ int crl2pkcs7_main(int argc, char **argv)
             if ((certflst == NULL)
                 && (certflst = sk_OPENSSL_STRING_new_null()) == NULL)
                 goto end;
-            if (!sk_OPENSSL_STRING_push(certflst, opt_arg())) {
-                sk_OPENSSL_STRING_free(certflst);
+            if (!sk_OPENSSL_STRING_push(certflst, opt_arg()))
                 goto end;
-            }
+            break;
+        case OPT_PROV_CASES:
+            if (!opt_provider(o))
+                goto end;
             break;
         }
     }
@@ -187,7 +149,7 @@ int crl2pkcs7_main(int argc, char **argv)
         goto end;
     p7s->cert = cert_stack;
 
-    if (certflst)
+    if (certflst != NULL)
         for (i = 0; i < sk_OPENSSL_STRING_num(certflst); i++) {
             certfile = sk_OPENSSL_STRING_value(certflst, i);
             if (add_certs_from_file(cert_stack, certfile) < 0) {
@@ -196,8 +158,6 @@ int crl2pkcs7_main(int argc, char **argv)
                 goto end;
             }
         }
-
-    sk_OPENSSL_STRING_free(certflst);
 
     out = bio_open_default(outfile, 'w', outformat);
     if (out == NULL)
@@ -214,12 +174,13 @@ int crl2pkcs7_main(int argc, char **argv)
     }
     ret = 0;
  end:
+    sk_OPENSSL_STRING_free(certflst);
     BIO_free(in);
     BIO_free_all(out);
     PKCS7_free(p7);
     X509_CRL_free(crl);
 
-    return (ret);
+    return ret;
 }
 
 /*-
@@ -269,5 +230,5 @@ static int add_certs_from_file(STACK_OF(X509) *stack, char *certfile)
     /* never need to OPENSSL_free x */
     BIO_free(in);
     sk_X509_INFO_free(sk);
-    return (ret);
+    return ret;
 }

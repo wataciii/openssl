@@ -1,4 +1,11 @@
-#!/usr/bin/env perl
+#! /usr/bin/env perl
+# Copyright 2016-2020 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+
 #
 # ====================================================================
 # Written by Andy Polyakov <appro@openssl.org> for the OpenSSL
@@ -16,24 +23,30 @@
 #		IALU/gcc-4.9	NEON
 #
 # Apple A7	1.86/+5%	0.72
-# Cortex-A53	2.63/+58%	1.47
+# Cortex-A53	2.69/+58%	1.47
 # Cortex-A57	2.70/+7%	1.14
-# Denver	1.39/+50%	1.18(*)
-# X-Gene	2.00/+68%	2.19
+# Denver	1.64/+50%	1.18(*)
+# X-Gene	2.13/+68%	2.27
+# Mongoose	1.77/+75%	1.12
+# Kryo		2.70/+55%	1.13
+# ThunderX2	1.17/+95%	1.36
 #
 # (*)	estimate based on resources availability is less than 1.0,
 #	i.e. measured result is worse than expected, presumably binary
 #	translator is not almighty;
 
-$flavour=shift;
-$output=shift;
+# $output is the last argument if it looks like a file (it has an extension)
+# $flavour is the first argument if it doesn't look like a file
+$output = $#ARGV >= 0 && $ARGV[$#ARGV] =~ m|\.\w+$| ? pop : undef;
+$flavour = $#ARGV >= 0 && $ARGV[0] !~ m|\.| ? shift : undef;
 
 $0 =~ m/(.*[\/\\])[^\/\\]+$/; $dir=$1;
 ( $xlate="${dir}arm-xlate.pl" and -f $xlate ) or
 ( $xlate="${dir}../../perlasm/arm-xlate.pl" and -f $xlate) or
 die "can't locate arm-xlate.pl";
 
-open OUT,"| \"$^X\" $xlate $flavour $output";
+open OUT,"| \"$^X\" $xlate $flavour \"$output\""
+    or die "can't call $xlate: $!";
 *STDOUT=*OUT;
 
 my ($ctx,$inp,$len,$padbit) = map("x$_",(0..3));
@@ -62,17 +75,12 @@ poly1305_init:
 	csel	x0,xzr,x0,eq
 	b.eq	.Lno_key
 
-#ifdef	__ILP32__
-	ldrsw	$t1,.LOPENSSL_armcap_P
-#else
-	ldr	$t1,.LOPENSSL_armcap_P
-#endif
-	adr	$t0,.LOPENSSL_armcap_P
+	adrp	x17,OPENSSL_armcap_P
+	ldr	w17,[x17,#:lo12:OPENSSL_armcap_P]
 
 	ldp	$r0,$r1,[$inp]		// load key
 	mov	$s1,#0xfffffffc0fffffff
 	movk	$s1,#0x0fff,lsl#48
-	ldr	w17,[$t0,$t1]
 #ifdef	__ARMEB__
 	rev	$r0,$r0			// flip bytes
 	rev	$r1,$r1
@@ -84,15 +92,19 @@ poly1305_init:
 
 	tst	w17,#ARMV7_NEON
 
-	adr	$d0,poly1305_blocks
-	adr	$r0,poly1305_blocks_neon
-	adr	$d1,poly1305_emit
-	adr	$r1,poly1305_emit_neon
+	adr	$d0,.Lpoly1305_blocks
+	adr	$r0,.Lpoly1305_blocks_neon
+	adr	$d1,.Lpoly1305_emit
+	adr	$r1,.Lpoly1305_emit_neon
 
 	csel	$d0,$d0,$r0,eq
 	csel	$d1,$d1,$r1,eq
 
+#ifdef	__ILP32__
+	stp	w12,w13,[$len]
+#else
 	stp	$d0,$d1,[$len]
+#endif
 
 	mov	x0,#1
 .Lno_key:
@@ -102,6 +114,7 @@ poly1305_init:
 .type	poly1305_blocks,%function
 .align	5
 poly1305_blocks:
+.Lpoly1305_blocks:
 	ands	$len,$len,#-16
 	b.eq	.Lno_data
 
@@ -151,7 +164,8 @@ poly1305_blocks:
 	and	$h2,$d2,#3
 	add	$t0,$t0,$d2,lsr#2
 	adds	$h0,$d0,$t0
-	adc	$h1,$d1,xzr
+	adcs	$h1,$d1,xzr
+	adc	$h2,$h2,xzr
 
 	cbnz	$len,.Loop
 
@@ -165,6 +179,7 @@ poly1305_blocks:
 .type	poly1305_emit,%function
 .align	5
 poly1305_emit:
+.Lpoly1305_emit:
 	ldp	$h0,$h1,[$ctx]		// load hash base 2^64
 	ldr	$h2,[$ctx,#16]
 	ldp	$t0,$t1,[$nonce]	// load nonce
@@ -235,7 +250,8 @@ poly1305_mult:
 	and	$h2,$d2,#3
 	add	$t0,$t0,$d2,lsr#2
 	adds	$h0,$d0,$t0
-	adc	$h1,$d1,xzr
+	adcs	$h1,$d1,xzr
+	adc	$h2,$h2,xzr
 
 	ret
 .size	poly1305_mult,.-poly1305_mult
@@ -270,12 +286,14 @@ poly1305_splat:
 .type	poly1305_blocks_neon,%function
 .align	5
 poly1305_blocks_neon:
+.Lpoly1305_blocks_neon:
 	ldr	$is_base2_26,[$ctx,#24]
 	cmp	$len,#128
 	b.hs	.Lblocks_neon
-	cbz	$is_base2_26,poly1305_blocks
+	cbz	$is_base2_26,.Lpoly1305_blocks
 
 .Lblocks_neon:
+	.inst	0xd503233f		// paciasp
 	stp	x29,x30,[sp,#-80]!
 	add	x29,sp,#0
 
@@ -310,7 +328,8 @@ poly1305_blocks_neon:
 	and	$h2,$d2,#3
 	add	$t0,$t0,$d2,lsr#2
 	adds	$h0,$h0,$t0
-	adc	$h1,$h1,xzr
+	adcs	$h1,$h1,xzr
+	adc	$h2,$h2,xzr
 
 #ifdef	__ARMEB__
 	rev	$d0,$d0
@@ -414,7 +433,7 @@ poly1305_blocks_neon:
 	csel	$in2,$zeros,$in2,lo
 
 	mov	x4,#1
-	str	x4,[$ctx,#-24]		// set is_base2_26
+	stur	x4,[$ctx,#-24]		// set is_base2_26
 	sub	$ctx,$ctx,#48		// restore original $ctx
 	b	.Ldo_neon
 
@@ -504,9 +523,11 @@ poly1305_blocks_neon:
 	fmov	$IN01_1,x6
 	add	x10,x10,x11,lsl#32	// bfi	x10,x11,#32,#32
 	add	x12,x12,x13,lsl#32	// bfi	x12,x13,#32,#32
+	movi	$MASK.2d,#-1
 	fmov	$IN01_2,x8
 	fmov	$IN01_3,x10
 	fmov	$IN01_4,x12
+	ushr	$MASK.2d,$MASK.2d,#38
 
 	b.ls	.Lskip_loop
 
@@ -657,41 +678,43 @@ poly1305_blocks_neon:
 	 fmov	$IN01_2,x8
 	umlal	$ACC2,$IN01_4,${S3}[0]
 	 fmov	$IN01_3,x10
+	 fmov	$IN01_4,x12
 
 	/////////////////////////////////////////////////////////////////
 	// lazy reduction as discussed in "NEON crypto" by D.J. Bernstein
-        // and P. Schwabe
+	// and P. Schwabe
+	//
+	// [see discussion in poly1305-armv4 module]
 
 	ushr	$T0.2d,$ACC3,#26
-	 fmov	$IN01_4,x12
 	xtn	$H3,$ACC3
 	 ushr	$T1.2d,$ACC0,#26
-	 xtn	$H0,$ACC0
+	 and	$ACC0,$ACC0,$MASK.2d
 	add	$ACC4,$ACC4,$T0.2d	// h3 -> h4
 	bic	$H3,#0xfc,lsl#24	// &=0x03ffffff
 	 add	$ACC1,$ACC1,$T1.2d	// h0 -> h1
-	 bic	$H0,#0xfc,lsl#24
 
-	shrn	$T0.2s,$ACC4,#26
+	ushr	$T0.2d,$ACC4,#26
 	xtn	$H4,$ACC4
 	 ushr	$T1.2d,$ACC1,#26
 	 xtn	$H1,$ACC1
-	 add	$ACC2,$ACC2,$T1.2d	// h1 -> h2
 	bic	$H4,#0xfc,lsl#24
-	 bic	$H1,#0xfc,lsl#24
+	 add	$ACC2,$ACC2,$T1.2d	// h1 -> h2
 
-	add	$H0,$H0,$T0.2s
-	shl	$T0.2s,$T0.2s,#2
+	add	$ACC0,$ACC0,$T0.2d
+	shl	$T0.2d,$T0.2d,#2
 	 shrn	$T1.2s,$ACC2,#26
 	 xtn	$H2,$ACC2
-	add	$H0,$H0,$T0.2s		// h4 -> h0
+	add	$ACC0,$ACC0,$T0.2d	// h4 -> h0
+	 bic	$H1,#0xfc,lsl#24
 	 add	$H3,$H3,$T1.2s		// h2 -> h3
 	 bic	$H2,#0xfc,lsl#24
 
-	ushr	$T0.2s,$H0,#26
-	bic	$H0,#0xfc,lsl#24
+	shrn	$T0.2s,$ACC0,#26
+	xtn	$H0,$ACC0
 	 ushr	$T1.2s,$H3,#26
 	 bic	$H3,#0xfc,lsl#24
+	 bic	$H0,#0xfc,lsl#24
 	add	$H1,$H1,$T0.2s		// h0 -> h1
 	 add	$H4,$H4,$T1.2s		// h3 -> h4
 
@@ -699,9 +722,7 @@ poly1305_blocks_neon:
 
 .Lskip_loop:
 	dup	$IN23_2,${IN23_2}[0]
-	movi	$MASK.2d,#-1
 	add	$IN01_2,$IN01_2,$H2
-	ushr	$MASK.2d,$MASK.2d,#38
 
 	////////////////////////////////////////////////////////////////
 	// multiply (inp[0:1]+hash) or inp[2:3] by r^2:r^1
@@ -841,6 +862,7 @@ poly1305_blocks_neon:
 	st1	{$ACC4}[0],[$ctx]
 
 .Lno_data_neon:
+	.inst	0xd50323bf		// autiasp
 	ldr	x29,[sp],#80
 	ret
 .size	poly1305_blocks_neon,.-poly1305_blocks_neon
@@ -848,6 +870,7 @@ poly1305_blocks_neon:
 .type	poly1305_emit_neon,%function
 .align	5
 poly1305_emit_neon:
+.Lpoly1305_emit_neon:
 	ldr	$is_base2_26,[$ctx,#24]
 	cbz	$is_base2_26,poly1305_emit
 
@@ -870,7 +893,8 @@ poly1305_emit_neon:
 	add	$d0,$d0,$h2,lsr#2
 	and	$h2,$h2,#3
 	adds	$h0,$h0,$d0
-	adc	$h1,$h1,xzr
+	adcs	$h1,$h1,xzr
+	adc	$h2,$h2,xzr
 
 	adds	$d0,$h0,#5		// compare to modulus
 	adcs	$d1,$h1,xzr
@@ -899,12 +923,6 @@ poly1305_emit_neon:
 .align	5
 .Lzeros:
 .long	0,0,0,0,0,0,0,0
-.LOPENSSL_armcap_P:
-#ifdef	__ILP32__
-.long	OPENSSL_armcap_P-.
-#else
-.quad	OPENSSL_armcap_P-.
-#endif
 .asciz	"Poly1305 for ARMv8, CRYPTOGAMS by <appro\@openssl.org>"
 .align	2
 ___
@@ -922,4 +940,4 @@ foreach (split("\n",$code)) {
 
 	print $_,"\n";
 }
-close STDOUT;
+close STDOUT or die "error closing STDOUT: $!";

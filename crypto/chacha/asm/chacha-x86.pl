@@ -1,4 +1,11 @@
-#!/usr/bin/env perl
+#! /usr/bin/env perl
+# Copyright 2016-2020 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+
 #
 # ====================================================================
 # Written by Andy Polyakov <appro@openssl.org> for the OpenSSL
@@ -21,7 +28,9 @@
 # Westmere	9.50/+45%	3.35
 # Sandy Bridge	10.5/+47%	3.20
 # Haswell	8.15/+50%	2.83
+# Skylake	7.53/+22%	2.75
 # Silvermont	17.4/+36%	8.35
+# Goldmont	13.4/+40%	4.36
 # Sledgehammer	10.2/+54%
 # Bulldozer	13.4/+50%	4.38(*)
 #
@@ -31,10 +40,9 @@ $0 =~ m/(.*[\/\\])[^\/\\]+$/; $dir=$1;
 push(@INC,"${dir}","${dir}../../perlasm");
 require "x86asm.pl";
 
-$output=pop;
-open STDOUT,">$output";
+$output = pop and open STDOUT,">$output";
 
-&asm_init($ARGV[0],"chacha-x86.pl",$ARGV[$#ARGV] eq "386");
+&asm_init($ARGV[0],$ARGV[$#ARGV] eq "386");
 
 $xmm=$ymm=0;
 for (@ARGV) { $xmm=1 if (/-DOPENSSL_IA32_SSE2/); }
@@ -42,7 +50,7 @@ for (@ARGV) { $xmm=1 if (/-DOPENSSL_IA32_SSE2/); }
 $ymm=1 if ($xmm &&
 		`$ENV{CC} -Wa,-v -c -o /dev/null -x assembler /dev/null 2>&1`
 			=~ /GNU assembler version ([2-9]\.[0-9]+)/ &&
-		$1>=2.19);	# first version supporting AVX
+		($gasver=$1)>=2.19);	# first version supporting AVX
 
 $ymm=1 if ($xmm && !$ymm && $ARGV[0] eq "win32n" &&
 		`nasm -v 2>&1` =~ /NASM version ([2-9]\.[0-9]+)/ &&
@@ -53,7 +61,7 @@ $ymm=1 if ($xmm && !$ymm && $ARGV[0] eq "win32" &&
 		$1>=10);	# first version supporting AVX
 
 $ymm=1 if ($xmm && !$ymm &&
-		`$ENV{CC} -v 2>&1` =~ /(^clang version|based on LLVM) ([3-9]\.[0-9]+)/ &&
+		`$ENV{CC} -v 2>&1` =~ /((?:^clang|LLVM) version|based on LLVM) ([0-9]+\.[0-9]+)/ &&
 		$2>=3.0);	# first version supporting AVX
 
 $a="eax";
@@ -437,8 +445,10 @@ my ($ap,$bp,$cp,$dp)=map(($_&~3)+(($_-1)&3),($ai,$bi,$ci,$di));	# previous
 
 &function_begin("ChaCha20_ssse3");
 &set_label("ssse3_shortcut");
+if ($ymm) {
 	&test		(&DWP(4,"ebp"),1<<11);		# test XOP bit
 	&jnz		(&label("xop_shortcut"));
+}
 
 	&mov		($out,&wparam(0));
 	&mov		($inp,&wparam(1));
@@ -455,6 +465,12 @@ my ($ap,$bp,$cp,$dp)=map(($_&~3)+(($_-1)&3),($ai,$bi,$ci,$di));	# previous
 				    &label("pic_point"),"eax"));
 	&movdqu		("xmm3",&QWP(0,"ebx"));		# counter and nonce
 
+if (defined($gasver) && $gasver>=2.17) {		# even though we encode
+							# pshufb manually, we
+							# handle only register
+							# operands, while this
+							# segment uses memory
+							# operand...
 	&cmp		($len,64*4);
 	&jb		(&label("1x"));
 
@@ -636,6 +652,7 @@ my ($ap,$bp,$cp,$dp)=map(($_&~3)+(($_-1)&3),($ai,$bi,$ci,$di));	# previous
 	&paddd		("xmm2",&QWP(16*6,"eax"));	# +four
 	&pand		("xmm3",&QWP(16*7,"eax"));
 	&por		("xmm3","xmm2");		# counter value
+}
 {
 my ($a,$b,$c,$d,$t,$t1,$rot16,$rot24)=map("xmm$_",(0..7));
 
@@ -770,7 +787,7 @@ sub SSSE3ROUND {	# critical path is 20 "SIMD ticks" per round
 }
 &asciz	("ChaCha20 for x86, CRYPTOGAMS by <appro\@openssl.org>");
 
-if ($xmm) {
+if ($ymm) {
 my ($xa,$xa_,$xb,$xb_,$xc,$xc_,$xd,$xd_)=map("xmm$_",(0..7));
 my ($out,$inp,$len)=("edi","esi","ecx");
 
@@ -1134,4 +1151,4 @@ sub XOPROUND {
 
 &asm_finish();
 
-close STDOUT;
+close STDOUT or die "error closing STDOUT: $!";

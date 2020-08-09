@@ -1,55 +1,10 @@
-/* ====================================================================
- * Copyright (c) 1999 The OpenSSL Project.  All rights reserved.
+/*
+ * Copyright 1999-2018 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 /*
@@ -64,6 +19,7 @@
 #include <stdio.h>
 #include <errno.h>
 
+#include "bio_local.h"
 #include "internal/cryptlib.h"
 
 #if defined(OPENSSL_SYS_WINCE)
@@ -83,7 +39,7 @@ void *_malloc32(__size_t);
 #  endif                        /* __INITIAL_POINTER_SIZE == 64 */
 # endif                         /* __INITIAL_POINTER_SIZE && defined
                                  * _ANSI_C_SOURCE */
-#elif defined(OPENSSL_SYS_NETWARE)
+#elif defined(__DJGPP__) && defined(OPENSSL_NO_SOCK)
 # define NO_SYSLOG
 #elif (!defined(MSDOS) || defined(WATT32)) && !defined(OPENSSL_SYS_VXWORKS) && !defined(NO_SYSLOG)
 # include <syslog.h>
@@ -129,20 +85,24 @@ static void xsyslog(BIO *bp, int priority, const char *string);
 static void xcloselog(BIO *bp);
 
 static const BIO_METHOD methods_slg = {
-    BIO_TYPE_MEM, "syslog",
+    BIO_TYPE_MEM,
+    "syslog",
+    /* TODO: Convert to new style write function */
+    bwrite_conv,
     slg_write,
-    NULL,
+    NULL,                      /* slg_write_old,    */
+    NULL,                      /* slg_read,         */
     slg_puts,
     NULL,
     slg_ctrl,
     slg_new,
     slg_free,
-    NULL,
+    NULL,                      /* slg_callback_ctrl */
 };
 
 const BIO_METHOD *BIO_s_log(void)
 {
-    return (&methods_slg);
+    return &methods_slg;
 }
 
 static int slg_new(BIO *bi)
@@ -151,15 +111,15 @@ static int slg_new(BIO *bi)
     bi->num = 0;
     bi->ptr = NULL;
     xopenlog(bi, "application", LOG_DAEMON);
-    return (1);
+    return 1;
 }
 
 static int slg_free(BIO *a)
 {
     if (a == NULL)
-        return (0);
+        return 0;
     xcloselog(a);
-    return (1);
+    return 1;
 }
 
 static int slg_write(BIO *b, const char *in, int inl)
@@ -237,9 +197,10 @@ static int slg_write(BIO *b, const char *in, int inl)
     };
 
     if ((buf = OPENSSL_malloc(inl + 1)) == NULL) {
-        return (0);
+        BIOerr(BIO_F_SLG_WRITE, ERR_R_MALLOC_FAILURE);
+        return 0;
     }
-    strncpy(buf, in, inl);
+    memcpy(buf, in, inl);
     buf[inl] = '\0';
 
     i = 0;
@@ -251,7 +212,7 @@ static int slg_write(BIO *b, const char *in, int inl)
     xsyslog(b, priority, pp);
 
     OPENSSL_free(buf);
-    return (ret);
+    return ret;
 }
 
 static long slg_ctrl(BIO *b, int cmd, long num, void *ptr)
@@ -264,7 +225,7 @@ static long slg_ctrl(BIO *b, int cmd, long num, void *ptr)
     default:
         break;
     }
-    return (0);
+    return 0;
 }
 
 static int slg_puts(BIO *bp, const char *str)
@@ -273,7 +234,7 @@ static int slg_puts(BIO *bp, const char *str)
 
     n = strlen(str);
     ret = slg_write(bp, str, n);
-    return (ret);
+    return ret;
 }
 
 # if defined(OPENSSL_SYS_WIN32)
@@ -447,4 +408,9 @@ static void xcloselog(BIO *bp)
 
 # endif                         /* Unix */
 
+#else                           /* NO_SYSLOG */
+const BIO_METHOD *BIO_s_log(void)
+{
+    return NULL;
+}
 #endif                          /* NO_SYSLOG */

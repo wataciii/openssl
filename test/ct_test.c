@@ -1,55 +1,10 @@
 /*
- * Tests the Certificate Transparency public API.
+ * Copyright 2016-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Author:      Rob Percival (robpercival@google.com)
- *
- * ====================================================================
- * Copyright (c) 2016 The OpenSSL Project.    All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *        notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *        notice, this list of conditions and the following disclaimer in
- *        the documentation and/or other materials provided with the
- *        distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *        software must display the following acknowledgment:
- *        "This product includes software developed by the OpenSSL Project
- *        for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *        endorse or promote products derived from this software without
- *        prior written permission. For written permission, please contact
- *        licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *        nor may "OpenSSL" appear in their names without prior written
- *        permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *        acknowledgment:
- *        "This product includes software developed by the OpenSSL Project
- *        for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.    IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
 #include <ctype.h>
@@ -63,28 +18,36 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 #include "testutil.h"
+#include <openssl/crypto.h>
 
 #ifndef OPENSSL_NO_CT
 
+DEFINE_STACK_OF(SCT)
+
 /* Used when declaring buffers to read text files into */
-#define CT_TEST_MAX_FILE_SIZE 8096
+# define CT_TEST_MAX_FILE_SIZE 8096
 
 static char *certs_dir = NULL;
 static char *ct_dir = NULL;
 
 typedef struct ct_test_fixture {
     const char *test_case_name;
+    /* The current time in milliseconds */
+    uint64_t epoch_time_in_ms;
     /* The CT log store to use during tests */
     CTLOG_STORE* ctlog_store;
     /* Set the following to test handling of SCTs in X509 certificates */
     const char *certs_dir;
     char *certificate_file;
     char *issuer_file;
+    /* Expected number of SCTs */
     int expected_sct_count;
+    /* Expected number of valid SCTS */
+    int expected_valid_sct_count;
     /* Set the following to test handling of SCTs in TLS format */
-    const unsigned char *tls_sct;
-    size_t tls_sct_len;
-    SCT *sct;
+    const unsigned char *tls_sct_list;
+    size_t tls_sct_list_len;
+    STACK_OF(SCT) *sct_list;
     /*
      * A file to load the expected SCT text from.
      * This text will be compared to the actual text output during the test.
@@ -94,131 +57,94 @@ typedef struct ct_test_fixture {
     const char *sct_text_file;
     /* Whether to test the validity of the SCT(s) */
     int test_validity;
-
 } CT_TEST_FIXTURE;
 
-static CT_TEST_FIXTURE set_up(const char *const test_case_name)
+static CT_TEST_FIXTURE *set_up(const char *const test_case_name)
 {
-    CT_TEST_FIXTURE fixture;
-    int setup_ok = 1;
-    CTLOG_STORE *ctlog_store = CTLOG_STORE_new();
+    CT_TEST_FIXTURE *fixture = NULL;
 
-    if (ctlog_store == NULL) {
-        setup_ok = 0;
-        fprintf(stderr, "Failed to create a new CT log store\n");
+    if (!TEST_ptr(fixture = OPENSSL_zalloc(sizeof(*fixture))))
         goto end;
-    }
-
-    if (CTLOG_STORE_load_default_file(ctlog_store) != 1) {
-        setup_ok = 0;
-        fprintf(stderr, "Failed to load CT log list\n");
+    fixture->test_case_name = test_case_name;
+    fixture->epoch_time_in_ms = 1580335307000ULL; /* Wed 29 Jan 2020 10:01:47 PM UTC */
+    if (!TEST_ptr(fixture->ctlog_store = CTLOG_STORE_new())
+            || !TEST_int_eq(
+                    CTLOG_STORE_load_default_file(fixture->ctlog_store), 1))
         goto end;
-    }
-
-    memset(&fixture, 0, sizeof(fixture));
-    fixture.test_case_name = test_case_name;
-    fixture.ctlog_store = ctlog_store;
+    return fixture;
 
 end:
-    if (!setup_ok) {
-        exit(EXIT_FAILURE);
-    }
-    return fixture;
+    if (fixture != NULL)
+        CTLOG_STORE_free(fixture->ctlog_store);
+    OPENSSL_free(fixture);
+    TEST_error("Failed to setup");
+    return NULL;
 }
 
-static void tear_down(CT_TEST_FIXTURE fixture)
+static void tear_down(CT_TEST_FIXTURE *fixture)
 {
-    CTLOG_STORE_free(fixture.ctlog_store);
-    SCT_free(fixture.sct);
-    ERR_print_errors_fp(stderr);
-}
-
-static char *mk_file_path(const char *dir, const char *file)
-{
-    char *full_file = NULL;
-    size_t full_file_l = 0;
-    const char *sep = "";
-#ifndef OPENSSL_SYS_VMS
-    sep = "/";
-#endif
-
-    full_file_l = strlen(dir) + strlen(sep) + strlen(file) + 1;
-    full_file = OPENSSL_zalloc(full_file_l);
-    if (full_file != NULL) {
-        OPENSSL_strlcpy(full_file, dir, full_file_l);
-        OPENSSL_strlcat(full_file, sep, full_file_l);
-        OPENSSL_strlcat(full_file, file, full_file_l);
+    if (fixture != NULL) {
+        CTLOG_STORE_free(fixture->ctlog_store);
+        SCT_LIST_free(fixture->sct_list);
     }
-
-    return full_file;
+    OPENSSL_free(fixture);
 }
 
 static X509 *load_pem_cert(const char *dir, const char *file)
 {
     X509 *cert = NULL;
-    char *file_path = mk_file_path(dir, file);
+    char *file_path = test_mk_file_path(dir, file);
 
     if (file_path != NULL) {
         BIO *cert_io = BIO_new_file(file_path, "r");
-        OPENSSL_free(file_path);
 
         if (cert_io != NULL)
             cert = PEM_read_bio_X509(cert_io, NULL, NULL, NULL);
-
         BIO_free(cert_io);
     }
+
+    OPENSSL_free(file_path);
     return cert;
 }
 
 static int read_text_file(const char *dir, const char *file,
                           char *buffer, int buffer_length)
 {
-    int result = -1;
-    char *file_path = mk_file_path(dir, file);
+    int len = -1;
+    char *file_path = test_mk_file_path(dir, file);
 
     if (file_path != NULL) {
         BIO *file_io = BIO_new_file(file_path, "r");
-        OPENSSL_free(file_path);
 
-        if (file_io != NULL) {
-            result = BIO_read(file_io, buffer, buffer_length);
-            BIO_free(file_io);
-        }
+        if (file_io != NULL)
+            len = BIO_read(file_io, buffer, buffer_length);
+        BIO_free(file_io);
     }
 
-    return result;
+    OPENSSL_free(file_path);
+    return len;
 }
 
-static int compare_sct_printout(SCT *sct,
-    const char *expected_output)
+static int compare_sct_list_printout(STACK_OF(SCT) *sct,
+                                     const char *expected_output)
 {
     BIO *text_buffer = NULL;
     char *actual_output = NULL;
-    int result = 1;
+    int result = 0;
 
-    text_buffer = BIO_new(BIO_s_mem());
-    if (text_buffer == NULL) {
-        fprintf(stderr, "Unable to allocate buffer\n");
+    if (!TEST_ptr(text_buffer = BIO_new(BIO_s_mem())))
         goto end;
-    }
 
-    SCT_print(sct, text_buffer, 0, NULL);
+    SCT_LIST_print(sct, text_buffer, 0, "\n", NULL);
 
-    /* Append null terminator because we're about to use the buffer contents
-    * as a string. */
-    if (BIO_write(text_buffer, "\0", 1) != 1) {
-        fprintf(stderr, "Failed to append null terminator to SCT text\n");
+    /* Append \0 because we're about to use the buffer contents as a string. */
+    if (!TEST_true(BIO_write(text_buffer, "\0", 1)))
         goto end;
-    }
 
     BIO_get_mem_data(text_buffer, &actual_output);
-    result = strcmp(actual_output, expected_output);
-
-    if (result != 0) {
-        fprintf(stderr,
-            "Expected SCT printout:\n%s\nActual SCT printout:\n%s\n",
-            expected_output, actual_output);
-    }
+    if (!TEST_str_eq(actual_output, expected_output))
+        goto end;
+    result = 1;
 
 end:
     BIO_free(text_buffer);
@@ -230,216 +156,171 @@ static int compare_extension_printout(X509_EXTENSION *extension,
 {
     BIO *text_buffer = NULL;
     char *actual_output = NULL;
-    int result = 1;
+    int result = 0;
 
-    text_buffer = BIO_new(BIO_s_mem());
-    if (text_buffer == NULL) {
-        fprintf(stderr, "Unable to allocate buffer\n");
+    if (!TEST_ptr(text_buffer = BIO_new(BIO_s_mem()))
+            || !TEST_true(X509V3_EXT_print(text_buffer, extension,
+                                           X509V3_EXT_DEFAULT, 0)))
         goto end;
-    }
 
-    if (!X509V3_EXT_print(text_buffer, extension, X509V3_EXT_DEFAULT, 0)) {
-        fprintf(stderr, "Failed to print extension\n");
+    /* Append \n because it's easier to create files that end with one. */
+    if (!TEST_true(BIO_write(text_buffer, "\n", 1)))
         goto end;
-    }
 
-    /* Append null terminator because we're about to use the buffer contents
-     * as a string. */
-    if (BIO_write(text_buffer, "\0", 1) != 1) {
-        fprintf(stderr, "Failed to append null terminator to extension text\n");
+    /* Append \0 because we're about to use the buffer contents as a string. */
+    if (!TEST_true(BIO_write(text_buffer, "\0", 1)))
         goto end;
-    }
 
     BIO_get_mem_data(text_buffer, &actual_output);
-    result = strcmp(actual_output, expected_output);
+    if (!TEST_str_eq(actual_output, expected_output))
+        goto end;
 
-    if (result != 0) {
-        fprintf(stderr,
-                "Expected SCT printout:\n%s\nActual SCT printout:\n%s\n",
-                expected_output, actual_output);
-    }
+    result = 1;
 
 end:
     BIO_free(text_buffer);
     return result;
 }
 
-static int execute_cert_test(CT_TEST_FIXTURE fixture)
+static int assert_validity(CT_TEST_FIXTURE *fixture, STACK_OF(SCT) *scts,
+                           CT_POLICY_EVAL_CTX *policy_ctx)
 {
-    int test_failed = 0;
+    int invalid_sct_count = 0;
+    int valid_sct_count = 0;
+    int i;
+
+    if (!TEST_int_ge(SCT_LIST_validate(scts, policy_ctx), 0))
+        return 0;
+
+    for (i = 0; i < sk_SCT_num(scts); ++i) {
+        SCT *sct_i = sk_SCT_value(scts, i);
+
+        switch (SCT_get_validation_status(sct_i)) {
+        case SCT_VALIDATION_STATUS_VALID:
+            ++valid_sct_count;
+            break;
+        case SCT_VALIDATION_STATUS_INVALID:
+            ++invalid_sct_count;
+            break;
+        case SCT_VALIDATION_STATUS_NOT_SET:
+        case SCT_VALIDATION_STATUS_UNKNOWN_LOG:
+        case SCT_VALIDATION_STATUS_UNVERIFIED:
+        case SCT_VALIDATION_STATUS_UNKNOWN_VERSION:
+            /* Ignore other validation statuses. */
+            break;
+        }
+    }
+
+    if (!TEST_int_eq(valid_sct_count, fixture->expected_valid_sct_count)) {
+        int unverified_sct_count = sk_SCT_num(scts) -
+                                        invalid_sct_count - valid_sct_count;
+
+        TEST_info("%d SCTs failed, %d SCTs unverified",
+                  invalid_sct_count, unverified_sct_count);
+        return 0;
+    }
+
+    return 1;
+}
+
+static int execute_cert_test(CT_TEST_FIXTURE *fixture)
+{
+    int success = 0;
     X509 *cert = NULL, *issuer = NULL;
     STACK_OF(SCT) *scts = NULL;
     SCT *sct = NULL;
     char expected_sct_text[CT_TEST_MAX_FILE_SIZE];
     int sct_text_len = 0;
-    unsigned char *tls_sct = NULL;
-    size_t tls_sct_len = 0;
+    unsigned char *tls_sct_list = NULL;
+    size_t tls_sct_list_len = 0;
     CT_POLICY_EVAL_CTX *ct_policy_ctx = CT_POLICY_EVAL_CTX_new();
 
-    if (fixture.sct_text_file != NULL) {
-        sct_text_len = read_text_file(fixture.sct_dir, fixture.sct_text_file,
+    if (fixture->sct_text_file != NULL) {
+        sct_text_len = read_text_file(fixture->sct_dir, fixture->sct_text_file,
                                       expected_sct_text,
                                       CT_TEST_MAX_FILE_SIZE - 1);
 
-        if (sct_text_len < 0) {
-            test_failed = 1;
-            fprintf(stderr, "Test data file not found: %s\n",
-                fixture.sct_text_file);
+        if (!TEST_int_ge(sct_text_len, 0))
             goto end;
-        }
-
         expected_sct_text[sct_text_len] = '\0';
     }
 
-    CT_POLICY_EVAL_CTX_set0_log_store(ct_policy_ctx, fixture.ctlog_store);
+    CT_POLICY_EVAL_CTX_set_shared_CTLOG_STORE(
+            ct_policy_ctx, fixture->ctlog_store);
 
-    if (fixture.certificate_file != NULL) {
+    CT_POLICY_EVAL_CTX_set_time(ct_policy_ctx, fixture->epoch_time_in_ms);
+
+    if (fixture->certificate_file != NULL) {
         int sct_extension_index;
+        int i;
         X509_EXTENSION *sct_extension = NULL;
-        cert = load_pem_cert(fixture.certs_dir, fixture.certificate_file);
 
-        if (cert == NULL) {
-            test_failed = 1;
-            fprintf(stderr, "Unable to load certificate: %s\n",
-                fixture.certificate_file);
+        if (!TEST_ptr(cert = load_pem_cert(fixture->certs_dir,
+                                           fixture->certificate_file)))
             goto end;
-        }
 
-        CT_POLICY_EVAL_CTX_set0_cert(ct_policy_ctx, cert);
+        CT_POLICY_EVAL_CTX_set1_cert(ct_policy_ctx, cert);
 
-        if (fixture.issuer_file != NULL) {
-            issuer = load_pem_cert(fixture.certs_dir, fixture.issuer_file);
-
-            if (issuer == NULL) {
-                test_failed = 1;
-                fprintf(stderr, "Unable to load issuer certificate: %s\n",
-                        fixture.issuer_file);
+        if (fixture->issuer_file != NULL) {
+            if (!TEST_ptr(issuer = load_pem_cert(fixture->certs_dir,
+                                                 fixture->issuer_file)))
                 goto end;
-            }
-
-            CT_POLICY_EVAL_CTX_set0_issuer(ct_policy_ctx, issuer);
+            CT_POLICY_EVAL_CTX_set1_issuer(ct_policy_ctx, issuer);
         }
 
         sct_extension_index =
                 X509_get_ext_by_NID(cert, NID_ct_precert_scts, -1);
         sct_extension = X509_get_ext(cert, sct_extension_index);
-        if (fixture.expected_sct_count > 0) {
-            if (sct_extension == NULL) {
-                test_failed = 1;
-                fprintf(stderr, "SCT extension not found in: %s\n",
-                    fixture.certificate_file);
+        if (fixture->expected_sct_count > 0) {
+            if (!TEST_ptr(sct_extension))
                 goto end;
+
+            if (fixture->sct_text_file
+                && !compare_extension_printout(sct_extension,
+                                               expected_sct_text))
+                    goto end;
+
+            scts = X509V3_EXT_d2i(sct_extension);
+            for (i = 0; i < sk_SCT_num(scts); ++i) {
+                SCT *sct_i = sk_SCT_value(scts, i);
+
+                if (!TEST_int_eq(SCT_get_source(sct_i),
+                                 SCT_SOURCE_X509V3_EXTENSION)) {
+                    goto end;
+                }
             }
 
-            if (fixture.sct_text_file) {
-                test_failed = compare_extension_printout(sct_extension,
-                                                    expected_sct_text);
-                if (test_failed != 0)
+            if (fixture->test_validity) {
+                if (!assert_validity(fixture, scts, ct_policy_ctx))
                     goto end;
             }
-
-            if (fixture.test_validity) {
-                int are_scts_validated = 0;
-                int i;
-
-                scts = X509V3_EXT_d2i(sct_extension);
-                for (i = 0; i < sk_SCT_num(scts); ++i) {
-                    SCT *sct_i = sk_SCT_value(scts, i);
-
-                    if (!SCT_set_source(sct_i, SCT_SOURCE_X509V3_EXTENSION)) {
-                        fprintf(stderr,
-                                "Error setting SCT source to X509v3 extension\n");
-                        test_failed = 1;
-                        goto end;
-                    }
-                }
-
-                are_scts_validated = SCT_LIST_validate(scts, ct_policy_ctx);
-                if (are_scts_validated < 0) {
-                    fprintf(stderr, "Error verifying SCTs\n");
-                    test_failed = 1;
-                } else if (!are_scts_validated) {
-                    int invalid_sct_count = 0;
-                    int valid_sct_count = 0;
-
-                    for (i = 0; i < sk_SCT_num(scts); ++i) {
-                        SCT *sct_i = sk_SCT_value(scts, i);
-                        switch (SCT_get_validation_status(sct_i)) {
-                        case SCT_VALIDATION_STATUS_VALID:
-                            ++valid_sct_count;
-                            break;
-                        case SCT_VALIDATION_STATUS_INVALID:
-                            ++invalid_sct_count;
-                            break;
-                        default:
-                            /* Ignore other validation statuses. */
-                            break;
-                        }
-                    }
-
-                    if (valid_sct_count != fixture.expected_sct_count) {
-                        int unverified_sct_count = sk_SCT_num(scts) -
-                                invalid_sct_count - valid_sct_count;
-
-                        fprintf(stderr,
-                                "%d SCTs failed verification\n"
-                                "%d SCTs passed verification (%d expected)\n"
-                                "%d SCTs were unverified\n",
-                                invalid_sct_count,
-                                valid_sct_count,
-                                fixture.expected_sct_count,
-                                unverified_sct_count);
-                    }
-                    test_failed = 1;
-                }
-
-                if (test_failed != 0)
-                    goto end;
-            }
-        } else if (sct_extension != NULL) {
-            test_failed = 1;
-            fprintf(stderr,
-                    "Expected no SCTs, but found SCT extension in: %s\n",
-                    fixture.certificate_file);
+        } else if (!TEST_ptr_null(sct_extension)) {
             goto end;
         }
     }
 
-    if (fixture.tls_sct != NULL) {
-        const unsigned char *p = fixture.tls_sct;
-        if (o2i_SCT(&sct, &p, fixture.tls_sct_len) == NULL) {
-            test_failed = 1;
-            fprintf(stderr, "Failed to decode SCT from TLS format\n");
+    if (fixture->tls_sct_list != NULL) {
+        const unsigned char *p = fixture->tls_sct_list;
+
+        if (!TEST_ptr(o2i_SCT_LIST(&scts, &p, fixture->tls_sct_list_len)))
             goto end;
-        }
 
-        if (fixture.sct_text_file) {
-            test_failed = compare_sct_printout(sct, expected_sct_text);
-            if (test_failed != 0)
+        if (fixture->test_validity && cert != NULL) {
+            if (!assert_validity(fixture, scts, ct_policy_ctx))
                 goto end;
         }
 
-        tls_sct_len = i2o_SCT(sct, &tls_sct);
-        if (tls_sct_len != fixture.tls_sct_len ||
-            memcmp(fixture.tls_sct, tls_sct, tls_sct_len) != 0) {
-            test_failed = 1;
-            fprintf(stderr, "Failed to encode SCT into TLS format correctly\n");
+        if (fixture->sct_text_file
+            && !compare_sct_list_printout(scts, expected_sct_text)) {
+                goto end;
+        }
+
+        tls_sct_list_len = i2o_SCT_LIST(scts, &tls_sct_list);
+        if (!TEST_mem_eq(fixture->tls_sct_list, fixture->tls_sct_list_len,
+                         tls_sct_list, tls_sct_list_len))
             goto end;
-        }
-
-        if (fixture.test_validity && cert != NULL) {
-            int is_sct_validated = SCT_validate(sct, ct_policy_ctx);
-            if (is_sct_validated < 0) {
-                test_failed = 1;
-                fprintf(stderr, "Error validating SCT\n");
-                goto end;
-            } else if (!is_sct_validated) {
-                test_failed = 1;
-                fprintf(stderr, "SCT failed verification\n");
-                goto end;
-            }
-        }
     }
+    success = 1;
 
 end:
     X509_free(cert);
@@ -447,72 +328,105 @@ end:
     SCT_LIST_free(scts);
     SCT_free(sct);
     CT_POLICY_EVAL_CTX_free(ct_policy_ctx);
-    OPENSSL_free(tls_sct);
-    return test_failed;
+    OPENSSL_free(tls_sct_list);
+    return success;
 }
 
-#define SETUP_CT_TEST_FIXTURE() SETUP_TEST_FIXTURE(CT_TEST_FIXTURE, set_up)
-#define EXECUTE_CT_TEST() EXECUTE_TEST(execute_cert_test, tear_down)
+# define SETUP_CT_TEST_FIXTURE() SETUP_TEST_FIXTURE(CT_TEST_FIXTURE, set_up)
+# define EXECUTE_CT_TEST() EXECUTE_TEST(execute_cert_test, tear_down)
 
-static int test_no_scts_in_certificate()
+static int test_no_scts_in_certificate(void)
 {
     SETUP_CT_TEST_FIXTURE();
-    fixture.certs_dir = certs_dir;
-    fixture.certificate_file = "leaf.pem";
-    fixture.issuer_file = "subinterCA.pem";
-    fixture.expected_sct_count = 0;
+    if (fixture == NULL)
+        return 0;
+    fixture->certs_dir = certs_dir;
+    fixture->certificate_file = "leaf.pem";
+    fixture->issuer_file = "subinterCA.pem";
+    fixture->expected_sct_count = 0;
     EXECUTE_CT_TEST();
+    return result;
 }
 
-static int test_one_sct_in_certificate()
+static int test_one_sct_in_certificate(void)
 {
     SETUP_CT_TEST_FIXTURE();
-    fixture.certs_dir = certs_dir;
-    fixture.certificate_file = "embeddedSCTs1.pem";
-    fixture.issuer_file = "embeddedSCTs1_issuer.pem";
-    fixture.expected_sct_count = 1;
-    fixture.sct_dir = certs_dir;
-    fixture.sct_text_file = "embeddedSCTs1.sct";
+    if (fixture == NULL)
+        return 0;
+    fixture->certs_dir = certs_dir;
+    fixture->certificate_file = "embeddedSCTs1.pem";
+    fixture->issuer_file = "embeddedSCTs1_issuer.pem";
+    fixture->expected_sct_count = 1;
+    fixture->sct_dir = certs_dir;
+    fixture->sct_text_file = "embeddedSCTs1.sct";
     EXECUTE_CT_TEST();
+    return result;
 }
 
-static int test_multiple_scts_in_certificate()
+static int test_multiple_scts_in_certificate(void)
 {
     SETUP_CT_TEST_FIXTURE();
-    fixture.certs_dir = certs_dir;
-    fixture.certificate_file = "embeddedSCTs3.pem";
-    fixture.issuer_file = "embeddedSCTs3_issuer.pem";
-    fixture.expected_sct_count = 3;
-    fixture.sct_dir = certs_dir;
-    fixture.sct_text_file = "embeddedSCTs3.sct";
+    if (fixture == NULL)
+        return 0;
+    fixture->certs_dir = certs_dir;
+    fixture->certificate_file = "embeddedSCTs3.pem";
+    fixture->issuer_file = "embeddedSCTs3_issuer.pem";
+    fixture->expected_sct_count = 3;
+    fixture->sct_dir = certs_dir;
+    fixture->sct_text_file = "embeddedSCTs3.sct";
     EXECUTE_CT_TEST();
+    return result;
 }
 
-static int test_verify_one_sct()
+static int test_verify_one_sct(void)
 {
     SETUP_CT_TEST_FIXTURE();
-    fixture.certs_dir = certs_dir;
-    fixture.certificate_file = "embeddedSCTs1.pem";
-    fixture.issuer_file = "embeddedSCTs1_issuer.pem";
-    fixture.expected_sct_count = 1;
-    fixture.test_validity = 1;
+    if (fixture == NULL)
+        return 0;
+    fixture->certs_dir = certs_dir;
+    fixture->certificate_file = "embeddedSCTs1.pem";
+    fixture->issuer_file = "embeddedSCTs1_issuer.pem";
+    fixture->expected_sct_count = fixture->expected_valid_sct_count = 1;
+    fixture->test_validity = 1;
     EXECUTE_CT_TEST();
+    return result;
 }
 
-static int test_verify_multiple_scts()
+static int test_verify_multiple_scts(void)
 {
     SETUP_CT_TEST_FIXTURE();
-    fixture.certs_dir = certs_dir;
-    fixture.certificate_file = "embeddedSCTs3.pem";
-    fixture.issuer_file = "embeddedSCTs3_issuer.pem";
-    fixture.expected_sct_count = 3;
-    fixture.test_validity = 1;
+    if (fixture == NULL)
+        return 0;
+    fixture->certs_dir = certs_dir;
+    fixture->certificate_file = "embeddedSCTs3.pem";
+    fixture->issuer_file = "embeddedSCTs3_issuer.pem";
+    fixture->expected_sct_count = fixture->expected_valid_sct_count = 3;
+    fixture->test_validity = 1;
     EXECUTE_CT_TEST();
+    return result;
 }
 
-static int test_decode_tls_sct()
+static int test_verify_fails_for_future_sct(void)
 {
-    const unsigned char tls_sct[] = "\x00" /* version */
+    SETUP_CT_TEST_FIXTURE();
+    if (fixture == NULL)
+        return 0;
+    fixture->epoch_time_in_ms = 1365094800000ULL; /* Apr 4 17:00:00 2013 GMT */
+    fixture->certs_dir = certs_dir;
+    fixture->certificate_file = "embeddedSCTs1.pem";
+    fixture->issuer_file = "embeddedSCTs1_issuer.pem";
+    fixture->expected_sct_count = 1;
+    fixture->expected_valid_sct_count = 0;
+    fixture->test_validity = 1;
+    EXECUTE_CT_TEST();
+    return result;
+}
+
+static int test_decode_tls_sct(void)
+{
+    const unsigned char tls_sct_list[] = "\x00\x78" /* length of list */
+        "\x00\x76"
+        "\x00" /* version */
         /* log ID */
         "\xDF\x1C\x2E\xC1\x15\x00\x94\x52\x47\xA9\x61\x68\x32\x5D\xDC\x5C\x79"
         "\x59\xE8\xF7\xC6\xD3\x88\xFC\x00\x2E\x0B\xBD\x3F\x74\xD7\x64"
@@ -529,83 +443,100 @@ static int test_decode_tls_sct()
         "\xED\xBF\x08";
 
     SETUP_CT_TEST_FIXTURE();
-    fixture.tls_sct = tls_sct;
-    fixture.tls_sct_len = 118;
-    fixture.sct_dir = ct_dir;
-    fixture.sct_text_file = "tls1.sct";
+    if (fixture == NULL)
+        return 0;
+    fixture->tls_sct_list = tls_sct_list;
+    fixture->tls_sct_list_len = 0x7a;
+    fixture->sct_dir = ct_dir;
+    fixture->sct_text_file = "tls1.sct";
     EXECUTE_CT_TEST();
+    return result;
 }
 
-static int test_encode_tls_sct()
+static int test_encode_tls_sct(void)
 {
-    const unsigned char log_id[] = "\xDF\x1C\x2E\xC1\x15\x00\x94\x52\x47\xA9"
-            "\x61\x68\x32\x5D\xDC\x5C\x79\x59\xE8\xF7\xC6\xD3\x88\xFC\x00\x2E"
-            "\x0B\xBD\x3F\x74\xD7\x64";
-
-    const unsigned char signature[] = "\x45\x02\x20\x48\x2F\x67\x51\xAF\x35"
-            "\xDB\xA6\x54\x36\xBE\x1F\xD6\x64\x0F\x3D\xBF\x9A\x41\x42\x94\x95"
-            "\x92\x45\x30\x28\x8F\xA3\xE5\xE2\x3E\x06\x02\x21\x00\xE4\xED\xC0"
-            "\xDB\x3A\xC5\x72\xB1\xE2\xF5\xE8\xAB\x6A\x68\x06\x53\x98\x7D\xCF"
-            "\x41\x02\x7D\xFE\xFF\xA1\x05\x51\x9D\x89\xED\xBF\x08";
+    const char log_id[] = "3xwuwRUAlFJHqWFoMl3cXHlZ6PfG04j8AC4LvT9012Q=";
+    const uint64_t timestamp = 1;
+    const char extensions[] = "";
+    const char signature[] = "BAMARzBAMiBIL2dRrzXbplQ2vh/WZA89v5pBQpSVkkUwKI+j5"
+            "eI+BgIhAOTtwNs6xXKx4vXoq2poBlOYfc9BAn3+/6EFUZ2J7b8I";
+    SCT *sct = NULL;
 
     SETUP_CT_TEST_FIXTURE();
+    if (fixture == NULL)
+        return 0;
 
-    SCT *sct = SCT_new();
-    if (!SCT_set_version(sct, SCT_VERSION_V1)) {
-        fprintf(stderr, "Failed to set SCT version\n");
-        return 1;
-    }
-    if (!SCT_set1_log_id(sct, log_id, 32)) {
-        fprintf(stderr, "Failed to set SCT log ID\n");
-        return 1;
-    }
-    SCT_set_timestamp(sct, 1);
-    if (!SCT_set_signature_nid(sct, NID_ecdsa_with_SHA256)) {
-        fprintf(stderr, "Failed to set SCT signature NID\n");
-        return 1;
-    }
-    if (!SCT_set1_signature(sct, signature, 71)) {
-        fprintf(stderr, "Failed to set SCT signature\n");
-        return 1;
-    }
-    fixture.sct = sct;
-    fixture.sct_dir = ct_dir;
-    fixture.sct_text_file = "tls1.sct";
+    fixture->sct_list = sk_SCT_new_null();
+    if (!TEST_ptr(sct = SCT_new_from_base64(SCT_VERSION_V1, log_id,
+                                            CT_LOG_ENTRY_TYPE_X509, timestamp,
+                                            extensions, signature)))
+
+        return 0;
+
+    sk_SCT_push(fixture->sct_list, sct);
+    fixture->sct_dir = ct_dir;
+    fixture->sct_text_file = "tls1.sct";
     EXECUTE_CT_TEST();
+    return result;
 }
 
-int main(int argc, char *argv[])
+/*
+ * Tests that the CT_POLICY_EVAL_CTX default time is approximately now.
+ * Allow +-10 minutes, as it may compensate for clock skew.
+ */
+static int test_default_ct_policy_eval_ctx_time_is_now(void)
 {
-    int result = 0;
-    char *tmp_env = NULL;
+    int success = 0;
+    CT_POLICY_EVAL_CTX *ct_policy_ctx = CT_POLICY_EVAL_CTX_new();
+    const time_t default_time =
+        (time_t)(CT_POLICY_EVAL_CTX_get_time(ct_policy_ctx) / 1000);
+    const time_t time_tolerance = 600;  /* 10 minutes */
 
-    tmp_env = getenv("CT_DIR");
-    ct_dir = OPENSSL_strdup(tmp_env != NULL ? tmp_env : "ct");
-    tmp_env = getenv("CERTS_DIR");
-    certs_dir = OPENSSL_strdup(tmp_env != NULL ? tmp_env : "certs");
+    if (!TEST_time_t_le(abs((int)difftime(time(NULL), default_time)),
+                        time_tolerance))
+        goto end;
+
+    success = 1;
+end:
+    CT_POLICY_EVAL_CTX_free(ct_policy_ctx);
+    return success;
+}
+
+static int test_ctlog_from_base64(void)
+{
+    CTLOG *ctlogp = NULL;
+    const char notb64[] = "\01\02\03\04";
+    const char pad[] = "====";
+    const char name[] = "name";
+
+    /* We expect these to both fail! */
+    if (!TEST_true(!CTLOG_new_from_base64(&ctlogp, notb64, name))
+        || !TEST_true(!CTLOG_new_from_base64(&ctlogp, pad, name)))
+        return 0;
+    return 1;
+}
+#endif
+
+int setup_tests(void)
+{
+#ifndef OPENSSL_NO_CT
+    if ((ct_dir = getenv("CT_DIR")) == NULL)
+        ct_dir = "ct";
+    if ((certs_dir = getenv("CERTS_DIR")) == NULL)
+        certs_dir = "certs";
 
     ADD_TEST(test_no_scts_in_certificate);
     ADD_TEST(test_one_sct_in_certificate);
     ADD_TEST(test_multiple_scts_in_certificate);
     ADD_TEST(test_verify_one_sct);
     ADD_TEST(test_verify_multiple_scts);
+    ADD_TEST(test_verify_fails_for_future_sct);
     ADD_TEST(test_decode_tls_sct);
     ADD_TEST(test_encode_tls_sct);
-
-    result = run_tests(argv[0]);
-    ERR_print_errors_fp(stderr);
-
-    OPENSSL_free(ct_dir);
-    OPENSSL_free(certs_dir);
-
-    return result;
+    ADD_TEST(test_default_ct_policy_eval_ctx_time_is_now);
+    ADD_TEST(test_ctlog_from_base64);
+#else
+    printf("No CT support\n");
+#endif
+    return 1;
 }
-
-#else /* OPENSSL_NO_CT */
-
-int main(int argc, char* argv[])
-{
-    return EXIT_SUCCESS;
-}
-
-#endif /* OPENSSL_NO_CT */
